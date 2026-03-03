@@ -256,6 +256,11 @@ export async function updateInstance(name, data) {
     const values = [];
     let paramIndex = 1;
 
+    if (data.name !== undefined) {
+      setClauses.push(`name = $${paramIndex++}`);
+      values.push(data.name);
+    }
+
     if (data.port !== undefined) {
       setClauses.push(`port = $${paramIndex++}`);
       values.push(data.port);

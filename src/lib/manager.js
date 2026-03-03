@@ -235,11 +235,19 @@ export function findDatasetFolders(baseDir, currentPath = '', maxDepth = 5, curr
       fs.statSync(path.join(fullPath, 'labels')).isDirectory();
 
     if (hasImages && hasLabels) {
+      let imageCount = 0;
+      try {
+        const imageExts = new Set(['.jpg', '.jpeg', '.png', '.bmp', '.gif', '.webp', '.tiff', '.tif']);
+        imageCount = fs.readdirSync(path.join(fullPath, 'images'))
+          .filter(f => imageExts.has(path.extname(f).toLowerCase())).length;
+      } catch (e) { /* ignore */ }
       results.push({
         name: currentPath || path.basename(fullPath),
         path: fullPath,
-        relativePath: currentPath
+        relativePath: currentPath,
+        imageCount
       });
+      // Fall through and continue recursing into subdirectories
     }
 
     const entries = fs.readdirSync(fullPath, { withFileTypes: true });

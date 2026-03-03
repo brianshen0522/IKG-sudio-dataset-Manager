@@ -141,7 +141,7 @@ const API_BASE = typeof window !== 'undefined' ? window.location.origin : '';
 
                     if (i === parts.length - 1) {
                         // This is a dataset
-                        tree[parentPath].datasets.add({ name: parts[i], path: d.path });
+                        tree[parentPath].datasets.add({ name: parts[i], path: d.path, imageCount: d.imageCount || 0 });
                     } else {
                         // This is a folder
                         tree[parentPath].folders.add(parts[i]);
@@ -309,15 +309,17 @@ const API_BASE = typeof window !== 'undefined' ? window.location.origin : '';
                 // If there are no subfolders at all, not a dataset folder
                 if (folders.length === 0) return false;
 
-                // Check if all folders are only "images" or "labels"
-                const datasetFolders = ['images', 'labels'];
-                return folders.every(f => datasetFolders.includes(f));
+                // A dataset folder must contain "images" and "labels",
+                // and have no other subfolders to navigate into (besides duplicate)
+                const datasetInternalDirs = new Set(['images', 'labels', 'duplicate']);
+                const navigableFolders = folders.filter(f => !datasetInternalDirs.has(f));
+                return folders.includes('images') && folders.includes('labels') && navigableFolders.length === 0;
             } catch (err) {
                 return false;
             }
         }
 
-        async function navigateToPath(path, updatePathField = true) {
+        function navigateToPath(path, updatePathField = true) {
             const basePath = config.datasetBasePath || '/data/datasets';
             const fullPath = path ? `${basePath}/${path}` : basePath;
 
@@ -325,68 +327,45 @@ const API_BASE = typeof window !== 'undefined' ? window.location.origin : '';
             const searchInput = document.getElementById('folderSearch');
             if (searchInput) searchInput.value = '';
 
-            // Check if this folder only contains images/labels - if so, don't enter it
-            if (path && await isDatasetFolder(fullPath)) {
-                // Select this folder as dataset path without entering it
+            // Update datasetPath first so renderFolderList shows the correct highlight
+            if (updatePathField) {
                 document.getElementById('datasetPath').value = fullPath;
-                fetchDuplicateRule(fullPath, true);
+            }
 
-                // Auto-populate instance name
-                const instanceNameField = document.getElementById('instanceName');
-                if (instanceNameField && !editingInstance) {
+            // Check if this folder has child datasets in the tree
+            const treeEntry = (window.datasetTree && window.datasetTree[path]) || { folders: new Set(), datasets: new Set() };
+            const hasChildren = treeEntry.folders.size > 0 || treeEntry.datasets.size > 0;
+
+            if (hasChildren) {
+                // Navigate into the folder
+                currentPath = path;
+                renderBreadcrumb(path);
+                renderFolderList(path);
+            } else {
+                // Leaf dataset — select it but stay at the current level
+                renderFolderList(currentPath);
+            }
+
+            if (!updatePathField) return;
+            fetchDuplicateRule(fullPath, true);
+
+            const instanceNameField = document.getElementById('instanceName');
+            if (instanceNameField && !instanceNameField.disabled) {
+                if (path) {
                     const pathParts = path.split('/').filter(p => p);
                     if (pathParts.length > 0) {
                         instanceNameField.value = pathParts[pathParts.length - 1];
                         validateInstanceName();
                     }
+                } else {
+                    instanceNameField.value = '';
+                    hideInstanceNameError();
                 }
-
-                // Load class files
-                const classFileInput = document.getElementById('classFile');
-                if (!classFileInput || !classFileInput.value) {
-                    loadClassFiles(fullPath);
-                }
-
-                // Re-render folder list to update highlight
-                renderFolderList(currentPath);
-
-                return; // Don't navigate into the folder
             }
 
-            currentPath = path;
-            renderBreadcrumb(path);
-            renderFolderList(path);
-
-            // Auto-update dataset path only if requested (skip when editing existing instance)
-            if (updatePathField) {
-                document.getElementById('datasetPath').value = fullPath;
-
-                // Fetch and display duplicate rule for this path
-                fetchDuplicateRule(fullPath, true);
-
-                // Auto-populate instance name from last folder name (only when adding new instance)
-                const instanceNameField = document.getElementById('instanceName');
-                if (instanceNameField && !editingInstance) {
-                    if (path) {
-                        const pathParts = path.split('/').filter(p => p);
-                        if (pathParts.length > 0) {
-                            const lastFolder = pathParts[pathParts.length - 1];
-                            instanceNameField.value = lastFolder;
-                            // Trigger validation
-                            validateInstanceName();
-                        }
-                    } else {
-                        // Clear instance name when at root
-                        instanceNameField.value = '';
-                        hideInstanceNameError();
-                    }
-                }
-
-                // Only auto-navigate class file browser if no class file is currently selected
-                const classFileInput = document.getElementById('classFile');
-                if (!classFileInput || !classFileInput.value) {
-                    loadClassFiles(fullPath || config.datasetBasePath);
-                }
+            const classFileInput = document.getElementById('classFile');
+            if (!classFileInput || !classFileInput.value) {
+                loadClassFiles(fullPath || config.datasetBasePath);
             }
         }
 
@@ -429,17 +408,25 @@ const API_BASE = typeof window !== 'undefined' ? window.location.origin : '';
             // Show all folders (including those that are datasets)
             const allItems = new Map();
 
-            // Add regular folders
-            Array.from(currentLevel.folders).forEach(folder => {
-                const folderPath = path ? `${path}/${folder}` : folder;
-                allItems.set(folder, { name: folder, path: folderPath });
+            // Add datasets first (they take priority — show imageCount)
+            Array.from(currentLevel.datasets).forEach(dataset => {
+                const folderPath = path ? `${path}/${dataset.name}` : dataset.name;
+                allItems.set(dataset.name, { name: dataset.name, path: folderPath, imageCount: dataset.imageCount });
             });
 
-            // Add datasets as folders too
-            Array.from(currentLevel.datasets).forEach(dataset => {
-                if (!allItems.has(dataset.name)) {
-                    const folderPath = path ? `${path}/${dataset.name}` : dataset.name;
-                    allItems.set(dataset.name, { name: dataset.name, path: folderPath });
+            // Add folders; if already a dataset, mark hasChildren; otherwise add with datasetCount
+            Array.from(currentLevel.folders).forEach(folder => {
+                const folderPath = path ? `${path}/${folder}` : folder;
+                if (allItems.has(folder)) {
+                    // This item is both a dataset and has child datasets — mark as navigable
+                    allItems.get(folder).hasChildren = true;
+                } else {
+                    // Intermediate folder — count child datasets, excluding 'duplicate' entries
+                    const datasetCount = datasets.filter(d => {
+                        if (d.name.split('/').pop() === 'duplicate') return false;
+                        return d.name === folderPath || d.name.startsWith(folderPath + '/');
+                    }).length;
+                    allItems.set(folder, { name: folder, path: folderPath, datasetCount });
                 }
             });
 
@@ -463,9 +450,16 @@ const API_BASE = typeof window !== 'undefined' ? window.location.origin : '';
 
             sortedItems.forEach(item => {
                 const isSelected = item.path === selectedRelativePath;
+                let countBadge = '';
+                if (item.imageCount !== undefined) {
+                    countBadge = `<span class="folder-count">${item.imageCount.toLocaleString()} imgs</span>`;
+                } else if (item.datasetCount !== undefined && item.datasetCount > 0) {
+                    countBadge = `<span class="folder-count">${item.datasetCount} dataset${item.datasetCount !== 1 ? 's' : ''}</span>`;
+                }
                 html += `
                     <div class="folder-item${isSelected ? ' selected' : ''}" onclick="navigateToPath('${item.path}')">
                         <div class="folder-name">${item.name}</div>
+                        ${countBadge}
                     </div>
                 `;
             });
@@ -1197,7 +1191,7 @@ const API_BASE = typeof window !== 'undefined' ? window.location.origin : '';
                 editingInstance = name;
                 document.getElementById('modalTitle').textContent = t('manager.modal.editTitle');
                 document.getElementById('instanceName').value = instance.name;
-                document.getElementById('instanceName').disabled = true;
+                document.getElementById('instanceName').disabled = false;
                 document.getElementById('threshold').value = instance.threshold;
                 document.getElementById('autoSync').checked = instance.autoSync || false;
                 document.getElementById('pentagonFormat').checked = instance.pentagonFormat || false;
@@ -1228,6 +1222,8 @@ const API_BASE = typeof window !== 'undefined' ? window.location.origin : '';
                 // IMPORTANT: Set the dataset path AFTER populateDatasetOptions()
                 // to prevent it from being overwritten by the base directory
                 document.getElementById('datasetPath').value = instance.datasetPath;
+                // Keep current instance name until user chooses a different dataset folder.
+                document.getElementById('instanceName').value = instance.name;
 
                 // Initialize class file browser - navigate to parent folder if classFile exists
                 if (instance.classFile) {
@@ -1290,6 +1286,7 @@ const API_BASE = typeof window !== 'undefined' ? window.location.origin : '';
 
         function closeModal() {
             document.getElementById('instanceModal').classList.remove('active');
+            editingInstance = null;
         }
 
         async function checkAndUpdatePentagonFormat(instanceName) {
@@ -1592,15 +1589,23 @@ const API_BASE = typeof window !== 'undefined' ? window.location.origin : '';
                 });
             }
 
-            // Update duplicate mode when dataset path is manually changed
+            // Update duplicate mode and instance name when dataset path is manually changed
             const datasetPathInput = document.getElementById('datasetPath');
             if (datasetPathInput) {
-                datasetPathInput.addEventListener('change', () => {
-                    fetchDuplicateRule(datasetPathInput.value, true);
-                });
-                datasetPathInput.addEventListener('blur', () => {
-                    fetchDuplicateRule(datasetPathInput.value, true);
-                });
+                function onDatasetPathChange() {
+                    const val = datasetPathInput.value.trim();
+                    fetchDuplicateRule(val, true);
+                    const instanceNameField = document.getElementById('instanceName');
+                    if (instanceNameField && !instanceNameField.disabled) {
+                        const parts = val.replace(/\/+$/, '').split('/').filter(p => p);
+                        if (parts.length > 0) {
+                            instanceNameField.value = parts[parts.length - 1];
+                            validateInstanceName();
+                        }
+                    }
+                }
+                datasetPathInput.addEventListener('change', onDatasetPathChange);
+                datasetPathInput.addEventListener('blur', onDatasetPathChange);
             }
         }
 
