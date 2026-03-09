@@ -28,6 +28,7 @@ let allImageList = [];
 let imageList = [];
 let labelCache = {};      // imgPath -> { classes: number[], count: number }
 let labelRaw = {};        // imgPath -> raw label string
+let thumbCache = {};      // imgPath -> blob URL
 let selectedImages = new Set();
 let filterState = {
   name: '',
@@ -35,7 +36,8 @@ let filterState = {
   classLogic: 'any',
   selectedClasses: new Set(),
   minLabels: 0,
-  maxLabels: null
+  maxLabels: null,
+  overlayFilteredOnly: true
 };
 let thumbObserver = null;
 let initialized = false;
@@ -804,6 +806,10 @@ function buildShell() {
         </select>
       </div>
       <div class="v-cls-list" id="vClsList"></div>
+      <label class="v-cls-item" style="margin-top:8px;padding:4px 0">
+        <input type="checkbox" id="vFOverlayFilter" onchange="vApply()">
+        <span style="font-size:12px;color:#ccc">${t('viewer.overlayFilteredOnly')}</span>
+      </label>
     </div>
     <div class="v-section">
       <div class="v-flabel">${t('editor.filter.labelCount')}</div>
@@ -943,9 +949,19 @@ function applyFilters() {
   const maxV = document.getElementById('vFMax')?.value;
   filterState.minLabels = minV ? (parseInt(minV, 10) || 0) : 0;
   filterState.maxLabels = maxV !== '' && maxV !== undefined ? (parseInt(maxV, 10) ?? null) : null;
+  const overlayChk = document.getElementById('vFOverlayFilter');
+  const prevOverlay = filterState.overlayFilteredOnly;
+  if (overlayChk) filterState.overlayFilteredOnly = overlayChk.checked;
 
+  const prevList = imageList;
   imageList = allImageList.filter(p => matchesFilter(p));
-  renderGrid();
+
+  const listChanged = imageList.length !== prevList.length || imageList.some((p, i) => p !== prevList[i]);
+  if (listChanged) {
+    renderGrid();
+  } else {
+    redrawAllOverlays();
+  }
   updateFilterStats();
   saveFilterState();
 }
@@ -983,7 +999,7 @@ function matchesFilter(imgPath) {
 }
 
 function clearFilters() {
-  filterState = { name: '', classMode: 'any', classLogic: 'any', selectedClasses: new Set(), minLabels: 0, maxLabels: null };
+  filterState = { name: '', classMode: 'any', classLogic: 'any', selectedClasses: new Set(), minLabels: 0, maxLabels: null, overlayFilteredOnly: true };
   const ids = ['vFName', 'vFMin', 'vFMax'];
   ids.forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
   const mode = document.getElementById('vFMode'); if (mode) mode.value = 'any';
@@ -1002,11 +1018,11 @@ function filterStorageKey() {
 
 function saveFilterState() {
   try {
-    const { name, classMode, classLogic, selectedClasses, minLabels, maxLabels } = filterState;
+    const { name, classMode, classLogic, selectedClasses, minLabels, maxLabels, overlayFilteredOnly } = filterState;
     localStorage.setItem(filterStorageKey(), JSON.stringify({
       name, classMode, classLogic,
       selectedClasses: [...selectedClasses],
-      minLabels, maxLabels
+      minLabels, maxLabels, overlayFilteredOnly
     }));
   } catch {}
 }
@@ -1022,7 +1038,8 @@ function restoreFilterState() {
       classLogic: saved.classLogic || 'any',
       selectedClasses: new Set(saved.selectedClasses || []),
       minLabels: saved.minLabels || 0,
-      maxLabels: saved.maxLabels ?? null
+      maxLabels: saved.maxLabels ?? null,
+      overlayFilteredOnly: saved.overlayFilteredOnly !== false
     };
     return true;
   } catch {
@@ -1045,6 +1062,9 @@ function syncFilterControls() {
 
   const maxEl = document.getElementById('vFMax');
   if (maxEl) maxEl.value = filterState.maxLabels !== null ? String(filterState.maxLabels) : '';
+
+  const overlayChk = document.getElementById('vFOverlayFilter');
+  if (overlayChk) overlayChk.checked = filterState.overlayFilteredOnly !== false;
 }
 
 function updateFilterStats() {
@@ -1079,10 +1099,14 @@ function renderGrid() {
     const entry = labelCache[p] || { count: 0 };
     const sel = selectedImages.has(p) ? ' sel' : '';
     const esc = escHtml(p).replace(/'/g, "\\'");
+    const cachedUrl = thumbCache[p];
+    const imgWrapContent = cachedUrl
+      ? `<img class="v-img" src="${cachedUrl}" alt="" onload="vBboxDraw(this,'${esc}',${i})"><svg class="v-svg" id="vs${i}" viewBox="0 0 1 1"></svg>`
+      : `<div class="v-placeholder">···</div>`;
     return `<div class="v-card${sel}" id="vc${i}" data-path="${escHtml(p)}" onclick="vOpen('${esc}')">
   <input class="v-card-cb" type="checkbox" ${sel ? 'checked' : ''} onclick="event.stopPropagation()" onchange="vToggleSel('${esc}',this.checked)">
   <button class="v-card-refresh" id="vrf${i}" title="Refresh label" onclick="event.stopPropagation();vRefreshLabel('${esc}',${i})">↺</button>
-  <div class="v-img-wrap" id="viw${i}"><div class="v-placeholder">···</div></div>
+  <div class="v-img-wrap" id="viw${i}">${imgWrapContent}</div>
   <div class="v-name" title="${escHtml(p)}">${escHtml(name)}</div>
   ${entry.count > 0 ? `<div class="v-lcount" id="vlc${i}">${entry.count}</div>` : `<div class="v-lcount" id="vlc${i}" style="display:none"></div>`}
 </div>`;
@@ -1122,6 +1146,12 @@ async function loadThumb(imgPath, idx, renderToken) {
     return;
   }
 
+  // Already rendered from cache in renderGrid — just mark done
+  if (thumbCache[imgPath] && wrap.querySelector('.v-img')) {
+    markThumbnailProgressDone(imgPath, renderToken);
+    return;
+  }
+
   try {
     const res = await fetch(`${API_BASE}/api/label-editor/load-thumbnails-batch`, {
       method: 'POST',
@@ -1142,6 +1172,7 @@ async function loadThumb(imgPath, idx, renderToken) {
     if (!imgBlob) { wrap.innerHTML = ''; return; }
 
     const url = URL.createObjectURL(imgBlob);
+    thumbCache[imgPath] = url;
     wrap.innerHTML = `<img class="v-img" src="${url}" alt="" onload="vBboxDraw(this,'${escHtml(imgPath).replace(/'/g, "\\'")}',${idx})">
 <svg class="v-svg" id="vs${idx}" viewBox="0 0 1 1"></svg>`;
     window.vBboxDraw = drawBboxes;
@@ -1200,11 +1231,28 @@ function extractFirstPart(buf, boundary) {
   return new Blob([bytes.slice(headerEnd, bodyEnd)], { type: mimeType });
 }
 
+function redrawAllOverlays() {
+  imageList.forEach((imgPath, i) => {
+    const wrap = document.getElementById(`viw${i}`);
+    if (!wrap) return;
+    const imgEl = wrap.querySelector('.v-img');
+    if (imgEl && imgEl.naturalWidth) drawBboxes(imgEl, imgPath, i);
+  });
+}
+
+function getDrawRaw(raw) {
+  if (!filterState.overlayFilteredOnly || filterState.selectedClasses.size === 0) return raw;
+  return raw.trim().split('\n').filter(line => {
+    const cls = parseInt(line.trim().split(/\s+/)[0], 10);
+    return !isNaN(cls) && filterState.selectedClasses.has(cls);
+  }).join('\n');
+}
+
 function drawBboxes(imgEl, imgPath, idx) {
   const svgEl = document.getElementById(`vs${idx}`);
   if (!svgEl || !imgEl.naturalWidth) return;
 
-  const raw = labelRaw[imgPath] || '';
+  const raw = getDrawRaw(labelRaw[imgPath] || '');
   if (!raw.trim()) return;
 
   const W = imgEl.naturalWidth;
@@ -1405,7 +1453,11 @@ async function deleteSelected() {
     const gone = new Set(selectedImages);
     selectedImages.clear();
     allImageList = allImageList.filter(p => !gone.has(p));
-    for (const p of gone) { delete labelCache[p]; delete labelRaw[p]; }
+    for (const p of gone) {
+      delete labelCache[p];
+      delete labelRaw[p];
+      if (thumbCache[p]) { URL.revokeObjectURL(thumbCache[p]); delete thumbCache[p]; }
+    }
 
     imageList = allImageList.filter(p => matchesFilter(p));
     buildFilterPanel();
@@ -1457,7 +1509,7 @@ async function refreshCardLabel(imgPath, idx) {
         svgEl.setAttribute('viewBox', `0 0 ${imgEl.naturalWidth} ${imgEl.naturalHeight}`);
         const fontSize = Math.max(10, Math.round(Math.min(imgEl.naturalWidth, imgEl.naturalHeight) * 0.06));
         let html = '';
-        for (const line of (content || '').trim().split('\n')) {
+        for (const line of getDrawRaw(content || '').trim().split('\n')) {
           const parts = line.trim().split(/\s+/).map(Number);
           if (parts.length < 5 || isNaN(parts[0])) continue;
           const cls = parts[0];
@@ -1584,7 +1636,7 @@ function drawLightboxBboxes(imgEl, imgPath) {
   const svgEl = document.getElementById('vLbSvg');
   if (!svgEl || !imgEl.naturalWidth) return;
 
-  const raw = labelRaw[imgPath] || '';
+  const raw = getDrawRaw(labelRaw[imgPath] || '');
   if (!raw.trim()) { svgEl.innerHTML = ''; return; }
 
   const W = imgEl.naturalWidth;

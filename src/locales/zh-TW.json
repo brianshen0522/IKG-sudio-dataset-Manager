@@ -312,6 +312,7 @@
     "findDuplicates": "尋找重複",
     "findDuplicatesConfirm": "是否對「{name}」執行重複偵測？重複項目將依實例的重複模式處理。",
     "noClasses": "未找到類別",
+    "overlayFilteredOnly": "疊加層只顯示篩選的類別",
     "errors": {
       "noInstanceOrPath": "未指定實例或資料集路徑",
       "loadConfigFailed": "載入實例設定失敗",

@@ -312,6 +312,7 @@
     "findDuplicates": "Find Duplicates",
     "findDuplicatesConfirm": "Run duplicate detection on \"{name}\"? Duplicates will be handled per the instance duplicate mode.",
     "noClasses": "No classes found",
+    "overlayFilteredOnly": "Show only filtered classes in overlay",
     "errors": {
       "noInstanceOrPath": "No instance or dataset path specified",
       "loadConfigFailed": "Failed to load instance config",
