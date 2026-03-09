@@ -2,6 +2,12 @@ services:
   postgres:
     image: postgres:16
     container_name: fiftyone-postgres
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+        reservations:
+          memory: 128M
     ports:
       - "5432:5432"
     volumes:
@@ -18,11 +24,9 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '8'
-          memory: 8G
+          memory: 512M
         reservations:
-          cpus: '1'
-          memory: 2G
+          memory: 128M
     depends_on:
       - postgres
     ports:
