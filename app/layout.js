@@ -1,5 +1,5 @@
-import HelpButton from './_components/HelpButton';
 import ClientProviders from './_components/ClientProviders';
+import './globals.css';
 
 export const metadata = {
   title: 'IKG studio dataset Manager'
@@ -11,7 +11,6 @@ export default function RootLayout({ children }) {
       <body>
         <ClientProviders>
           {children}
-          <HelpButton />
         </ClientProviders>
       </body>
     </html>

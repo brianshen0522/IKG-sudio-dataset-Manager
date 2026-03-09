@@ -1,211 +1,737 @@
-"use client";
+'use client';
 
-import { useEffect, useRef } from 'react';
-import { useTranslation } from './_components/LanguageProvider';
-import './manager.css';
+import { useState, useEffect, useCallback } from 'react';
+import { useRouter } from 'next/navigation';
+import AppHeader from './_components/AppHeader';
+import { useCurrentUser } from './_components/useCurrentUser';
+import FileBrowser from './_components/FileBrowser';
+import DatasetBrowser from './_components/DatasetBrowser';
 
-export default function Page() {
-  const apiRef = useRef(null);
-  const { t, isReady } = useTranslation();
-  const managerTitle = t('manager.title');
-  const managerTitleRest = managerTitle.replace(/^IKG\s*/i, '');
+const STATUS_COLOR = {
+  unassigned: '#9ba9c3',
+  unlabelled: '#f1b11a',
+  labeling: '#2f7ff5',
+  labelled: '#20c25a',
+};
 
-  useEffect(() => {
-    let active = true;
-    import('@/lib/manager-ui').then((mod) => {
-      if (!active) return;
-      apiRef.current = mod;
-      if (mod.initManager) {
-        mod.initManager();
-      }
-    });
-    return () => {
-      active = false;
-    };
-  }, []);
+const STATUS_LABEL = {
+  unassigned: 'Unassigned',
+  unlabelled: 'Unlabelled',
+  labeling: 'In Progress',
+  labelled: 'Done',
+};
 
-  const callApi = (method, ...args) => {
-    const api = apiRef.current;
-    if (!api || typeof api[method] !== 'function') {
-      return;
+function ProgressBar({ jobs }) {
+  if (!jobs || jobs.length === 0) return <div style={styles.progressEmpty}>No jobs</div>;
+  const total = jobs.length;
+  const counts = { unassigned: 0, unlabelled: 0, labeling: 0, labelled: 0 };
+  for (const j of jobs) counts[j.status] = (counts[j.status] || 0) + 1;
+  const labelled = counts.labelled;
+  return (
+    <div>
+      <div style={styles.progressBar}>
+        {['labelled', 'labeling', 'unlabelled', 'unassigned'].map((s) => {
+          const pct = (counts[s] / total) * 100;
+          return pct > 0 ? (
+            <div
+              key={s}
+              style={{ ...styles.progressSegment, width: `${pct}%`, background: STATUS_COLOR[s] }}
+              title={`${STATUS_LABEL[s]}: ${counts[s]}`}
+            />
+          ) : null;
+        })}
+      </div>
+      <div style={styles.progressStats}>
+        {Object.entries(counts).filter(([, v]) => v > 0).map(([s, v]) => (
+          <span key={s} style={{ ...styles.progressStat, color: STATUS_COLOR[s] }}>
+            {STATUS_LABEL[s]}: {v}
+          </span>
+        ))}
+        <span style={styles.progressStat}>Total: {total} jobs</span>
+        <span style={{ ...styles.progressStat, color: labelled === total ? '#20c25a' : '#9ba9c3' }}>
+          {Math.round((labelled / total) * 100)}%
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function AddDatasetModal({ onClose, onCreated }) {
+  const [path, setPath] = useState('');
+  const [displayName, setDisplayName] = useState('');
+  const [classFile, setClassFile] = useState('');
+  const [obbFormat, setObbFormat] = useState(false);
+  const [obbMode, setObbMode] = useState('rectangle');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [showPathBrowser, setShowPathBrowser] = useState(false);
+  const [showClassFileBrowser, setShowClassFileBrowser] = useState(false);
+
+  async function handleSubmit(e) {
+    e.preventDefault();
+    setError('');
+    setLoading(true);
+    try {
+      const res = await fetch('/api/datasets', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          datasetPath: path.trim(),
+          displayName: displayName.trim() || undefined,
+          classFile: classFile.trim() || null,
+          pentagonFormat: obbFormat,
+          obbMode: obbFormat ? obbMode : 'rectangle',
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) { setError(data.error || 'Failed to create dataset'); return; }
+      onCreated(data.dataset);
+    } catch {
+      setError('Network error');
+    } finally {
+      setLoading(false);
     }
-    api[method](...args);
-  };
-
-  if (!isReady) {
-    return <div className="page"><div style={{ padding: '20px', color: '#aaa' }}>Loading...</div></div>;
   }
 
   return (
     <>
-      <div className="page">
-        <header className="top-bar">
-          <div className="title-wrap">
-            <div className="title">
-              <img src="/ikg-logo.svg" alt="IKG logo" className="title-logo" />
-              <span className="title-highlight">IKG</span>
-              <span className="title-text">{managerTitleRest ? ` ${managerTitleRest}` : ''}</span>
-            </div>
-            <div className="subtitle">{t('manager.subtitle')}</div>
-          </div>
-          <div className="top-actions" data-tour="bulk-actions">
-            <button
-              id="removeSelectedBtn"
-              className="btn danger"
-              onClick={() => callApi('removeSelectedInstances')}
-              disabled
-            >
-              {t('manager.removeSelected')}
-            </button>
-            <button
-              className="btn ghost"
-              data-tour="add-instance"
-              onClick={() => callApi('showAddModal')}
-            >
-              {t('manager.addInstance')}
-            </button>
-          </div>
-        </header>
+    <div style={styles.modalOverlay}>
+      <div style={{ ...styles.modal, maxWidth: '520px', maxHeight: '90vh', overflowY: 'auto' }} onClick={(e) => e.stopPropagation()}>
+        <div style={styles.modalHeader}>
+          <h2 style={styles.modalTitle}>Add Dataset</h2>
+          <button style={styles.closeBtn} onClick={onClose}>×</button>
+        </div>
+        <form onSubmit={handleSubmit} style={styles.form}>
 
-        <section className="section">
-          <div className="section-title" data-tour="select-all">
+          <div style={styles.field}>
+            <label style={styles.label}>Display Name</label>
             <input
-              type="checkbox"
-              id="selectAllCheckbox"
-              className="instance-select-checkbox"
-              onChange={() => callApi('toggleSelectAll')}
-              style={{ marginRight: '8px' }}
+              style={styles.input}
+              value={displayName}
+              onChange={(e) => setDisplayName(e.target.value)}
+              placeholder="Dataset name"
+              autoFocus
             />
-            {t('manager.instances')}
-            <small>
-              {t('manager.basePath')}: <span id="basePath">-</span>
+          </div>
+
+          <div style={styles.field}>
+            <label style={styles.label}>Dataset Path *</label>
+            <div style={styles.inputRow}>
+              <input
+                style={{ ...styles.input, flex: 1 }}
+                value={path}
+                onChange={(e) => setPath(e.target.value)}
+                placeholder="/data/my-dataset"
+                required
+              />
+              <button type="button" style={styles.browseBtn} onClick={() => setShowPathBrowser(true)}>Browse</button>
+            </div>
+            <small style={styles.hint}>Absolute path to the directory containing an images/ folder</small>
+          </div>
+
+          <div style={styles.field}>
+            <label style={styles.label}>Class Names File</label>
+            <div style={styles.inputRow}>
+              <input
+                style={{ ...styles.input, flex: 1 }}
+                value={classFile}
+                onChange={(e) => setClassFile(e.target.value)}
+                placeholder="/data/my-dataset/classes.txt"
+              />
+              <button type="button" style={styles.browseBtn} onClick={() => setShowClassFileBrowser(true)}>Browse</button>
+            </div>
+            <small style={styles.hint}>Path to a .txt file with one class name per line</small>
+          </div>
+
+          <div style={styles.sectionDivider} />
+
+          <div style={styles.field}>
+            <label style={styles.checkboxRow}>
+              <input
+                type="checkbox"
+                checked={obbFormat}
+                onChange={(e) => setObbFormat(e.target.checked)}
+                style={styles.checkbox}
+              />
+              <span style={styles.checkboxLabel}>OBB Format (Polygon)</span>
+            </label>
+            <small style={styles.hint}>
+              Convert YOLO bounding boxes to OBB format (4 points, clockwise from top-left)
             </small>
           </div>
-          <div id="instancesContainer" className="instances" data-tour="instances-list">
-            <div className="empty-state">
-              <p>{t('common.loading')}</p>
-            </div>
-          </div>
-        </section>
-      </div>
 
-      <div id="instanceModal" className="modal" data-tour="instance-modal">
-        <div className="modal-content">
-          <div className="modal-header">
-            <h2 id="modalTitle">{t('manager.modal.addTitle')}</h2>
-            <button className="close-btn" onClick={() => callApi('closeModal')} type="button">
-              &times;
-            </button>
-          </div>
-          <div id="modalError" className="error-message" style={{ display: 'none' }} />
-          <form id="instanceForm" onSubmit={(event) => callApi('saveInstance', event)}>
-            <div className="form-group" data-tour="form-name">
-              <label htmlFor="instanceName">{t('manager.modal.instanceName')} *</label>
-              <input type="text" id="instanceName" required />
-              <small>{t('manager.modal.instanceNameHint')}</small>
-              <div
-                id="instanceNameError"
-                className="error-message"
-                style={{ display: 'none', marginTop: '8px' }}
-              >
-                {t('manager.modal.instanceNameExists')}
-              </div>
-            </div>
-            <div className="form-group" data-tour="form-dataset">
-              <label htmlFor="datasetPath">{t('manager.modal.datasetPath')} *</label>
-              <div className="dataset-browser">
-                <div className="breadcrumb" id="breadcrumb" />
-                <div className="folder-search">
-                  <input type="text" id="folderSearch" placeholder={t('manager.folder.searchPlaceholder')} onInput={() => callApi('filterFolderList')} />
-                  <button type="button" className="folder-search-clear" id="folderSearchClear" onClick={() => callApi('clearFolderSearch')}>✕</button>
-                </div>
-                <div className="folder-list" id="folderList">
-                  <div className="folder-item">{t('common.loading')}</div>
-                </div>
-              </div>
-              <input type="text" id="datasetPath" required placeholder={t('manager.modal.datasetPathHint')} />
-              <small>{t('manager.modal.datasetPathHint')}</small>
-            </div>
-            <div className="form-group" data-tour="form-classfile">
-              <label htmlFor="classFile">{t('manager.modal.classFile')}</label>
-              <div className="dataset-browser">
-                <div className="breadcrumb" id="classBreadcrumb" />
-                <div className="folder-search">
-                  <input type="text" id="classFolderSearch" placeholder={t('manager.folder.searchPlaceholder')} onInput={() => callApi('filterClassFolderList')} />
-                  <button type="button" className="folder-search-clear" id="classFolderSearchClear" onClick={() => callApi('clearClassFolderSearch')}>✕</button>
-                </div>
-                <div className="folder-list" id="classFolderList">
-                  <div className="folder-item">{t('common.loading')}</div>
-                </div>
-              </div>
-              <input type="text" id="classFile" placeholder={t('manager.modal.datasetPathHint')} />
-              <small>{t('manager.modal.classFileHint')}</small>
-              <div id="classPreview" className="class-preview">
-                <div className="class-preview-header">
-                  <span>{t('manager.modal.preview')}</span>
-                  <span id="classPreviewMeta" className="class-preview-badge">
-                    0 {t('manager.modal.lines')}
-                  </span>
-                </div>
-                <div id="classPreviewBody" className="class-preview-body">
-                  {t('manager.modal.selectClassFile')}
-                </div>
-                <div id="classPreviewNote" className="class-preview-note" style={{ display: 'none' }} />
-                <div id="classPreviewError" className="class-preview-error" style={{ display: 'none' }} />
-              </div>
-            </div>
-            <div className="form-group">
-              <label htmlFor="duplicateMode">{t('manager.modal.duplicateModeLabel')}</label>
-              <select id="duplicateMode" onChange={() => callApi('updateDuplicateModeDisplay')}>
-                <option value="none">{t('manager.modal.duplicateModeNone')}</option>
-                <option value="move">{t('manager.modal.duplicateModeMove')}</option>
-                <option value="delete">{t('manager.modal.duplicateModeDelete')}</option>
+          {obbFormat && (
+            <div style={styles.field}>
+              <label style={styles.label}>OBB Creation Mode</label>
+              <select style={styles.select} value={obbMode} onChange={(e) => setObbMode(e.target.value)}>
+                <option value="rectangle">Rectangle (axis-aligned → 4-point)</option>
+                <option value="4point">4-Point (free polygon)</option>
               </select>
-              <small>{t('manager.modal.duplicateModeHint')}</small>
-              <div id="duplicateModeEnvInfo" className="duplicate-mode-info" style={{ display: 'none' }}>
-                <span className="duplicate-mode-label">{t('manager.modal.duplicateMode')}:</span>
-                <span id="duplicateModeAction" className="duplicate-mode-action"></span>
-                <span id="duplicateModeLabels" className="duplicate-mode-labels"></span>
-                <span id="duplicateModePattern" className="duplicate-mode-pattern"></span>
-              </div>
             </div>
-            <div className="form-group">
-              <label htmlFor="threshold">{t('manager.modal.duplicateThreshold')}</label>
-              <input type="number" id="threshold" step="0.01" min="0" max="1" />
-              <small>{t('manager.modal.duplicateThresholdHint')}</small>
-            </div>
-            <div className="form-group">
-              <div className="checkbox-group">
-                <input type="checkbox" id="pentagonFormat" />
-                <label htmlFor="pentagonFormat">{t('manager.modal.obbFormat')}</label>
-              </div>
-              <small>{t('manager.modal.obbFormatHint')}</small>
-            </div>
-            <div className="form-group" id="obbModeGroup" style={{ display: 'none' }}>
-              <label htmlFor="obbMode">{t('manager.modal.obbCreationMode')}</label>
-              <select id="obbMode">
-                <option value="rectangle">{t('manager.modal.obbModeRectangle')}</option>
-                <option value="4point">{t('manager.modal.obbMode4Point')}</option>
-              </select>
-              <small>{t('manager.modal.obbModeHint')}</small>
-            </div>
-            <div className="form-group" data-tour="form-save">
-              <button type="submit" id="saveInstanceBtn" className="btn success" style={{ width: '100%' }}>
-                {t('manager.modal.saveInstance')}
-              </button>
-            </div>
-          </form>
-        </div>
-      </div>
+          )}
 
-      <div id="processingOverlay" className="processing-overlay" role="alert" aria-live="assertive">
-        <div className="processing-card">
-          <div className="spinner" aria-hidden="true" />
-          <div id="processingText" className="processing-text">
-            {t('common.processing')}
-          </div>
-        </div>
+          {error && <p style={styles.errorMsg}>{error}</p>}
+          <button type="submit" style={styles.submitBtn} disabled={loading}>
+            {loading ? 'Creating…' : 'Create Dataset'}
+          </button>
+        </form>
       </div>
+    </div>
+
+      {showPathBrowser && (
+        <DatasetBrowser
+          value={path}
+          onChange={(p) => {
+            setPath(p);
+            const folderName = p.split('/').filter(Boolean).pop() || '';
+            setDisplayName(folderName);
+          }}
+          onClassFileFound={(cf) => { if (cf) setClassFile(cf); }}
+          onClose={() => setShowPathBrowser(false)}
+        />
+      )}
+      {showClassFileBrowser && (
+        <FileBrowser
+          mode="file"
+          fileFilter={(f) => f.endsWith('.txt') || f.endsWith('.names') || f.endsWith('.yaml') || f.endsWith('.yml')}
+          value={classFile}
+          onChange={setClassFile}
+          onClose={() => setShowClassFileBrowser(false)}
+        />
+      )}
     </>
   );
 }
+
+export default function DashboardPage() {
+  const router = useRouter();
+  const { user, loading: authLoading } = useCurrentUser();
+  const [datasets, setDatasets] = useState([]);
+  const [jobs, setJobs] = useState({}); // datasetId → jobs[]
+  const [loading, setLoading] = useState(true);
+  const [showAdd, setShowAdd] = useState(false);
+  const [error, setError] = useState('');
+
+  const isAdmin = user?.role === 'admin';
+  const isDM = user?.role === 'data-manager';
+  const isAdminOrDM = isAdmin || isDM;
+
+  const loadDatasets = useCallback(async () => {
+    try {
+      const res = await fetch('/api/datasets');
+      const data = await res.json();
+      if (res.ok) setDatasets(data.datasets || []);
+      else setError(data.error || 'Failed to load datasets');
+    } catch {
+      setError('Network error');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  const loadJobs = useCallback(async (datasetId) => {
+    try {
+      const res = await fetch(`/api/datasets/${datasetId}/jobs`);
+      const data = await res.json();
+      if (res.ok) {
+        setJobs((prev) => ({ ...prev, [datasetId]: data.jobs || [] }));
+      }
+    } catch { /* ignore */ }
+  }, []);
+
+  useEffect(() => {
+    if (!authLoading) loadDatasets();
+  }, [authLoading, loadDatasets]);
+
+  useEffect(() => {
+    if (isAdminOrDM && datasets.length > 0) {
+      datasets.forEach((d) => loadJobs(d.id));
+    }
+  }, [isAdminOrDM, datasets, loadJobs]);
+
+  // For regular users: show their assigned jobs grouped by dataset
+  const myJobs = !isAdminOrDM && datasets.length > 0
+    ? datasets.flatMap((d) => (jobs[d.id] || []).map((j) => ({ ...j, dataset: d })))
+    : [];
+
+  if (authLoading || loading) {
+    return (
+      <div style={styles.page}>
+        <AppHeader />
+        <div style={styles.loading}>Loading…</div>
+      </div>
+    );
+  }
+
+  if (isAdminOrDM) {
+    return (
+      <div style={styles.page}>
+        <AppHeader />
+        <main style={styles.main}>
+          <div style={styles.topBar}>
+            <div>
+              <h1 style={styles.h1}>Datasets</h1>
+              <p style={styles.subtitle}>{datasets.length} dataset{datasets.length !== 1 ? 's' : ''}</p>
+            </div>
+            {isAdmin && (
+              <button style={styles.addBtn} onClick={() => setShowAdd(true)}>+ Add Dataset</button>
+            )}
+          </div>
+
+          {error && <p style={styles.errorMsg}>{error}</p>}
+
+          {datasets.length === 0 ? (
+            <div style={styles.empty}>
+              <p style={styles.emptyText}>No datasets yet.</p>
+              {isAdmin && (
+                <button style={styles.addBtn} onClick={() => setShowAdd(true)}>Add your first dataset</button>
+              )}
+            </div>
+          ) : (
+            <div style={styles.grid}>
+              {datasets.map((d) => {
+                const dsJobs = jobs[d.id];
+                return (
+                  <div
+                    key={d.id}
+                    style={styles.card}
+                    onClick={() => router.push(`/datasets/${d.id}`)}
+                    role="button"
+                    tabIndex={0}
+                    onKeyDown={(e) => e.key === 'Enter' && router.push(`/datasets/${d.id}`)}
+                  >
+                    <div style={styles.cardHeader}>
+                      <span style={styles.cardName}>{d.displayName || d.datasetPath.split('/').pop()}</span>
+                      <span style={styles.cardImages}>{d.totalImages} images</span>
+                    </div>
+                    <p style={styles.cardPath}>{d.datasetPath}</p>
+                    {dsJobs ? (
+                      <ProgressBar jobs={dsJobs} />
+                    ) : (
+                      <div style={styles.progressEmpty}>Loading jobs…</div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </main>
+
+        {showAdd && (
+          <AddDatasetModal
+            onClose={() => setShowAdd(false)}
+            onCreated={(ds) => {
+              setShowAdd(false);
+              setDatasets((prev) => [ds, ...prev]);
+              loadJobs(ds.id);
+            }}
+          />
+        )}
+      </div>
+    );
+  }
+
+  // Regular user view: load my assigned jobs
+  return (
+    <UserDashboard user={user} />
+  );
+}
+
+function UserDashboard({ user }) {
+  const router = useRouter();
+  const [jobs, setJobs] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    async function load() {
+      try {
+        const res = await fetch('/api/my-jobs');
+        const data = await res.json();
+        if (res.ok) setJobs(data.jobs || []);
+      } catch { /* ignore */ } finally {
+        setLoading(false);
+      }
+    }
+    load();
+  }, []);
+
+  if (loading) {
+    return (
+      <div style={styles.page}>
+        <AppHeader />
+        <div style={styles.loading}>Loading…</div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={styles.page}>
+      <AppHeader />
+      <main style={styles.main}>
+        <div style={styles.topBar}>
+          <div>
+            <h1 style={styles.h1}>My Jobs</h1>
+            <p style={styles.subtitle}>{jobs.length} assigned job{jobs.length !== 1 ? 's' : ''}</p>
+          </div>
+        </div>
+
+        {jobs.length === 0 ? (
+          <div style={styles.empty}>
+            <p style={styles.emptyText}>No jobs assigned to you yet.</p>
+            <p style={{ color: '#9ba9c3', fontSize: '13px' }}>Ask your data manager to assign jobs.</p>
+          </div>
+        ) : (
+          <div style={styles.jobList}>
+            {jobs.map((j) => (
+              <div key={j.id} style={styles.jobCard}>
+                <div style={styles.jobCardLeft}>
+                  <span style={styles.jobCardDataset}>{j.datasetName || j.datasetPath?.split('/').pop() || `Dataset ${j.datasetId}`}</span>
+                  <span style={styles.jobCardTitle}>Job #{j.jobIndex}</span>
+                  <span style={styles.jobCardRange}>Images {j.imageStart}–{j.imageEnd}</span>
+                </div>
+                <div style={styles.jobCardRight}>
+                  <span style={{ ...styles.statusBadge, background: STATUS_COLOR[j.status] + '22', color: STATUS_COLOR[j.status] }}>
+                    {STATUS_LABEL[j.status]}
+                  </span>
+                  {(j.status === 'unlabelled' || j.status === 'labeling') && (
+                    <button
+                      style={styles.openBtn}
+                      onClick={() => router.push(`/label-editor?jobId=${j.id}`)}
+                    >
+                      Open
+                    </button>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </main>
+    </div>
+  );
+}
+
+const styles = {
+  page: {
+    minHeight: '100vh',
+    background: 'radial-gradient(circle at 20% 20%, #15233a, #0a111f 50%), radial-gradient(circle at 80% 0%, #12213a, #0a111f 40%), #0d1626',
+    color: '#e6edf7',
+    fontFamily: '"Nunito Sans", "Segoe UI", system-ui, -apple-system, sans-serif',
+    display: 'flex',
+    flexDirection: 'column',
+  },
+  loading: {
+    padding: '60px',
+    textAlign: 'center',
+    color: '#9ba9c3',
+  },
+  main: {
+    maxWidth: '1200px',
+    width: '100%',
+    margin: '0 auto',
+    padding: '32px 24px 60px',
+  },
+  topBar: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    marginBottom: '28px',
+  },
+  h1: {
+    fontSize: '26px',
+    fontWeight: 800,
+    color: '#e6edf7',
+    margin: 0,
+  },
+  subtitle: {
+    color: '#9ba9c3',
+    fontSize: '13px',
+    marginTop: '4px',
+  },
+  addBtn: {
+    background: '#e45d25',
+    border: 'none',
+    borderRadius: '8px',
+    color: '#fff',
+    cursor: 'pointer',
+    fontSize: '13px',
+    fontWeight: 700,
+    padding: '10px 18px',
+    transition: 'background 0.15s',
+  },
+  errorMsg: {
+    color: '#f87171',
+    background: 'rgba(248,113,113,0.08)',
+    border: '1px solid rgba(248,113,113,0.2)',
+    borderRadius: '6px',
+    padding: '10px 14px',
+    fontSize: '13px',
+    marginBottom: '16px',
+  },
+  empty: {
+    textAlign: 'center',
+    padding: '80px 20px',
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    gap: '16px',
+  },
+  emptyText: {
+    color: '#9ba9c3',
+    fontSize: '15px',
+  },
+  grid: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(auto-fill, minmax(340px, 1fr))',
+    gap: '16px',
+  },
+  card: {
+    background: '#152033',
+    border: '1px solid #25344d',
+    borderRadius: '12px',
+    padding: '20px',
+    cursor: 'pointer',
+    transition: 'border-color 0.15s, box-shadow 0.15s',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '10px',
+    outline: 'none',
+  },
+  cardHeader: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    gap: '8px',
+  },
+  cardName: {
+    fontSize: '16px',
+    fontWeight: 700,
+    color: '#e6edf7',
+    flex: 1,
+    wordBreak: 'break-all',
+  },
+  cardImages: {
+    fontSize: '12px',
+    color: '#9ba9c3',
+    whiteSpace: 'nowrap',
+  },
+  cardPath: {
+    fontSize: '11px',
+    color: '#5a6a8a',
+    fontFamily: 'monospace',
+    wordBreak: 'break-all',
+    margin: 0,
+  },
+  progressBar: {
+    height: '8px',
+    borderRadius: '4px',
+    background: '#1b2940',
+    display: 'flex',
+    overflow: 'hidden',
+    gap: '1px',
+  },
+  progressSegment: {
+    height: '100%',
+    transition: 'width 0.3s',
+  },
+  progressEmpty: {
+    fontSize: '11px',
+    color: '#5a6a8a',
+  },
+  progressStats: {
+    display: 'flex',
+    flexWrap: 'wrap',
+    gap: '8px',
+  },
+  progressStat: {
+    fontSize: '11px',
+    color: '#9ba9c3',
+  },
+  jobList: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '10px',
+  },
+  jobCard: {
+    background: '#152033',
+    border: '1px solid #25344d',
+    borderRadius: '10px',
+    padding: '16px 20px',
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: '16px',
+  },
+  jobCardLeft: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '3px',
+    flex: 1,
+  },
+  jobCardDataset: {
+    fontSize: '11px',
+    color: '#9ba9c3',
+    textTransform: 'uppercase',
+    letterSpacing: '0.4px',
+  },
+  jobCardTitle: {
+    fontSize: '15px',
+    fontWeight: 700,
+    color: '#e6edf7',
+  },
+  jobCardRange: {
+    fontSize: '12px',
+    color: '#5a6a8a',
+  },
+  jobCardRight: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '10px',
+  },
+  statusBadge: {
+    fontSize: '12px',
+    fontWeight: 700,
+    padding: '4px 10px',
+    borderRadius: '20px',
+  },
+  openBtn: {
+    background: '#e45d25',
+    border: 'none',
+    borderRadius: '6px',
+    color: '#fff',
+    cursor: 'pointer',
+    fontSize: '12px',
+    fontWeight: 700,
+    padding: '6px 14px',
+  },
+  // Modal
+  modalOverlay: {
+    position: 'fixed',
+    inset: 0,
+    background: 'rgba(0,0,0,0.7)',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 1000,
+  },
+  modal: {
+    background: '#152033',
+    border: '1px solid #25344d',
+    borderRadius: '14px',
+    padding: '28px',
+    width: '100%',
+    maxWidth: '480px',
+    boxShadow: '0 20px 60px rgba(0,0,0,0.6)',
+  },
+  modalHeader: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: '20px',
+  },
+  modalTitle: {
+    fontSize: '18px',
+    fontWeight: 800,
+    color: '#e6edf7',
+    margin: 0,
+  },
+  closeBtn: {
+    background: 'transparent',
+    border: 'none',
+    color: '#9ba9c3',
+    cursor: 'pointer',
+    fontSize: '22px',
+    lineHeight: 1,
+    padding: '0 4px',
+  },
+  form: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '16px',
+  },
+  field: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '6px',
+  },
+  label: {
+    color: '#9ba9c3',
+    fontSize: '13px',
+    fontWeight: 600,
+  },
+  input: {
+    background: '#0d1626',
+    border: '1px solid #25344d',
+    borderRadius: '8px',
+    color: '#e6edf7',
+    fontSize: '14px',
+    padding: '10px 12px',
+    outline: 'none',
+    width: '100%',
+    boxSizing: 'border-box',
+  },
+  hint: {
+    color: '#5a6a8a',
+    fontSize: '11px',
+  },
+  select: {
+    background: '#0d1626',
+    border: '1px solid #25344d',
+    borderRadius: '8px',
+    color: '#e6edf7',
+    fontSize: '14px',
+    padding: '10px 12px',
+    outline: 'none',
+    width: '100%',
+  },
+  inputRow: {
+    display: 'flex',
+    gap: '8px',
+    alignItems: 'center',
+  },
+  browseBtn: {
+    background: 'transparent',
+    border: '1px solid #25344d',
+    borderRadius: '8px',
+    color: '#9ba9c3',
+    cursor: 'pointer',
+    fontSize: '12px',
+    fontWeight: 600,
+    padding: '10px 12px',
+    whiteSpace: 'nowrap',
+    flexShrink: 0,
+  },
+  sectionDivider: {
+    borderTop: '1px solid #1b2940',
+    margin: '4px 0',
+  },
+  checkboxRow: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '10px',
+    cursor: 'pointer',
+  },
+  checkbox: {
+    width: '16px',
+    height: '16px',
+    accentColor: '#e45d25',
+    flexShrink: 0,
+  },
+  checkboxLabel: {
+    fontSize: '14px',
+    fontWeight: 600,
+    color: '#e6edf7',
+  },
+  submitBtn: {
+    background: '#e45d25',
+    border: 'none',
+    borderRadius: '8px',
+    color: '#fff',
+    cursor: 'pointer',
+    fontSize: '14px',
+    fontWeight: 700,
+    padding: '12px',
+    marginTop: '4px',
+    transition: 'background 0.15s',
+  },
+};

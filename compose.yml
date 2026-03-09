@@ -50,6 +50,8 @@ services:
       - DUPLICATE_RULES=${DUPLICATE_RULES:-}
       - DUPLICATE_DEFAULT_ACTION=${DUPLICATE_DEFAULT_ACTION:-move}
       - THUMBNAIL_QUALITY=${THUMBNAIL_QUALITY:-50}
+      - JWT_SECRET=${JWT_SECRET:?JWT_SECRET is required}
+      - INITIAL_ADMIN_PASSWORD=${INITIAL_ADMIN_PASSWORD:-admin}
     restart: unless-stopped
 
 volumes:

@@ -109,6 +109,7 @@ import { initI18n, onLanguageChange, t } from '@/lib/i18n';
         let selectedImages = new Set();
         let imageSelectMode = false;
         let currentInstanceName = '';
+        let currentJobId = '';
 
         // Filter support
         let labelCache = {}; // Cache label info for filtering: { imagePath: { classes: [0,1,2], count: 3 } }
@@ -141,6 +142,7 @@ import { initI18n, onLanguageChange, t } from '@/lib/i18n';
         const relativeLabel = urlParams.get('lbl');
         let folderParam = urlParams.get('folder');
         const instanceNameParam = urlParams.get('instance') || '';
+        const jobIdParam = urlParams.get('jobId') || '';
         let startImageParam = urlParams.get('start');
         let lastKnownImageParam = startImageParam || '';
 
@@ -231,7 +233,31 @@ import { initI18n, onLanguageChange, t } from '@/lib/i18n';
             // Fetch config from instance if instance parameter is provided
             let preloadCountLoaded = false;
 
-            if (instanceNameParam && !basePath) {
+            if (jobIdParam && !basePath) {
+                try {
+                    const cfgResp = await fetch(`/api/label-editor/instance-config?jobId=${encodeURIComponent(jobIdParam)}`);
+                    if (cfgResp.ok) {
+                        const cfg = await cfgResp.json();
+                        basePath = cfg.basePath || '';
+                        folderParam = folderParam || cfg.folder || '';
+                        obbModeParam = obbModeParam !== 'rectangle' ? obbModeParam : (cfg.obbMode || 'rectangle');
+                        if (!startImageParam && cfg.lastImagePath) {
+                            startImageParam = cfg.lastImagePath;
+                            lastKnownImageParam = startImageParam;
+                        }
+                        if (cfg.labelEditorPreloadCount !== undefined) {
+                            applyLabelEditorPreloadCount(cfg.labelEditorPreloadCount);
+                            preloadCountLoaded = true;
+                        }
+                    } else {
+                        const err = await cfgResp.json().catch(() => ({}));
+                        showErrorMessage(err.error || 'Failed to load job config');
+                        return;
+                    }
+                } catch (err) {
+                    console.warn('Failed to load job config:', err);
+                }
+            } else if (instanceNameParam && !basePath) {
                 try {
                     const cfgResp = await fetch(`/api/label-editor/instance-config?name=${encodeURIComponent(instanceNameParam)}`);
                     if (cfgResp.ok) {
@@ -267,8 +293,9 @@ import { initI18n, onLanguageChange, t } from '@/lib/i18n';
                 }
             }
 
-            // Store instance name for persistence
+            // Store identity for persistence
             currentInstanceName = instanceNameParam;
+            currentJobId = jobIdParam;
 
             // Set OBB creation mode from URL parameter (admin-controlled)
             obbCreationMode = obbModeParam;
@@ -435,13 +462,15 @@ import { initI18n, onLanguageChange, t } from '@/lib/i18n';
         }
 
         async function saveFilterState(filterState, sortMode = previewSortMode) {
-            if (!currentInstanceName) return;
+            if (!currentJobId && !currentInstanceName) return;
             if (isApplyingSavedFilter) return;
             try {
                 await fetch('/api/label-editor/filter', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ name: currentInstanceName, filter: filterState, previewSortMode: sortMode })
+                    body: JSON.stringify(currentJobId
+                        ? { jobId: Number(currentJobId), filter: filterState, previewSortMode: sortMode }
+                        : { name: currentInstanceName, filter: filterState, previewSortMode: sortMode })
                 });
             } catch (err) {
                 console.warn('Failed to save filter state:', err);
@@ -449,13 +478,15 @@ import { initI18n, onLanguageChange, t } from '@/lib/i18n';
         }
 
         async function savePreviewSortMode(sortMode) {
-            if (!currentInstanceName) return;
+            if (!currentJobId && !currentInstanceName) return;
             if (isApplyingSavedFilter) return;
             try {
                 await fetch('/api/label-editor/filter', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ name: currentInstanceName, previewSortMode: sortMode })
+                    body: JSON.stringify(currentJobId
+                        ? { jobId: Number(currentJobId), previewSortMode: sortMode }
+                        : { name: currentInstanceName, previewSortMode: sortMode })
                 });
             } catch (err) {
                 console.warn('Failed to save preview sort mode:', err);
@@ -481,9 +512,12 @@ import { initI18n, onLanguageChange, t } from '@/lib/i18n';
         }
 
         async function loadSavedFilter() {
-            if (!currentInstanceName) return;
+            if (!currentJobId && !currentInstanceName) return;
             try {
-                const resp = await fetch(`/api/label-editor/filter?name=${encodeURIComponent(currentInstanceName)}`);
+                const url = currentJobId
+                    ? `/api/label-editor/filter?jobId=${encodeURIComponent(currentJobId)}`
+                    : `/api/label-editor/filter?name=${encodeURIComponent(currentInstanceName)}`;
+                const resp = await fetch(url);
                 if (!resp.ok) return;
                 const data = await resp.json();
                 if (!data) return;
@@ -1015,11 +1049,13 @@ import { initI18n, onLanguageChange, t } from '@/lib/i18n';
         }
 
         async function applyLastImageSelection() {
-            if (!folderParam || !basePath) {
+            if (!currentJobId && (!folderParam || !basePath)) {
                 return;
             }
             try {
-                const response = await fetch(`/api/label-editor/last-image?basePath=${encodeURIComponent(basePath)}&folder=${encodeURIComponent(folderParam)}`);
+                const response = await fetch(currentJobId
+                    ? `/api/label-editor/last-image?jobId=${encodeURIComponent(currentJobId)}`
+                    : `/api/label-editor/last-image?basePath=${encodeURIComponent(basePath)}&folder=${encodeURIComponent(folderParam)}`);
                 if (response.ok) {
                     const data = await response.json();
                     if (data.lastImagePath) {
@@ -4730,6 +4766,10 @@ import { initI18n, onLanguageChange, t } from '@/lib/i18n';
                     content: yoloContent
                 };
 
+                if (currentJobId) {
+                    requestBody.jobId = Number(currentJobId);
+                }
+
                 if (basePath && currentLabelPath) {
                     requestBody.basePath = basePath;
                     requestBody.relativeLabelPath = currentLabelPath;
@@ -4840,12 +4880,16 @@ import { initI18n, onLanguageChange, t } from '@/lib/i18n';
                 fetch('/api/label-editor/last-image', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
+                    body: JSON.stringify(currentJobId ? {
+                        jobId: Number(currentJobId),
+                        imagePath: imagePath.split('/').pop()
+                    } : {
                         basePath: basePath,
                         imagePath: imagePath.split('/').pop(),
                         instanceName: currentInstanceName
                     })
-                }).catch(() => {});
+                }).catch(() => {});  // end currentJobId ternary
+
                 lastImageSaveTimer = null;
             }, LAST_IMAGE_SAVE_DELAY);
         }
@@ -4862,21 +4906,26 @@ import { initI18n, onLanguageChange, t } from '@/lib/i18n';
 
         let saveSelectedDebounce = null;
         function persistSelectedImages() {
-            if (!currentInstanceName) return;
+            if (!currentJobId && !currentInstanceName) return;
             clearTimeout(saveSelectedDebounce);
             saveSelectedDebounce = setTimeout(() => {
                 fetch('/api/label-editor/selected-images', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ name: currentInstanceName, selectedImages: Array.from(selectedImages).map(p => p.split('/').pop()) })
+                    body: JSON.stringify(currentJobId
+                        ? { jobId: Number(currentJobId), selectedImages: Array.from(selectedImages).map(p => p.split('/').pop()) }
+                        : { name: currentInstanceName, selectedImages: Array.from(selectedImages).map(p => p.split('/').pop()) })
                 }).catch(() => {});
             }, 300);
         }
 
         async function loadSelectedImages() {
-            if (!currentInstanceName) return;
+            if (!currentJobId && !currentInstanceName) return;
             try {
-                const resp = await fetch(`/api/label-editor/selected-images?name=${encodeURIComponent(currentInstanceName)}`);
+                const url = currentJobId
+                    ? `/api/label-editor/selected-images?jobId=${encodeURIComponent(currentJobId)}`
+                    : `/api/label-editor/selected-images?name=${encodeURIComponent(currentInstanceName)}`;
+                const resp = await fetch(url);
                 if (resp.ok) {
                     const data = await resp.json();
                     if (Array.isArray(data.selectedImages) && data.selectedImages.length > 0) {

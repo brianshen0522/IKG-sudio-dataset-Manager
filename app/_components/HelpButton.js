@@ -15,6 +15,8 @@ export default function HelpButton() {
 
   const isLabelEditor = pathname?.startsWith('/label-editor');
 
+  if (pathname === '/login') return null;
+
   return (
     <>
       <div className={styles.floatingControls}>
