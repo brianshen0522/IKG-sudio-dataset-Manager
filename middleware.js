@@ -45,6 +45,7 @@ export async function middleware(req) {
   requestHeaders.set('x-user-id', String(user.sub));
   requestHeaders.set('x-user-role', user.role);
   requestHeaders.set('x-user-name', user.username || '');
+  requestHeaders.set('x-user-token-version', String(user.tokenVersion ?? 1));
 
   return NextResponse.next({ request: { headers: requestHeaders } });
 }

@@ -2,6 +2,7 @@ import pg from 'pg';
 import path from 'path';
 import fs from 'fs';
 import bcrypt from 'bcryptjs';
+import { emitUserInvalidated } from './auth-events.js';
 
 const { Pool } = pg;
 
@@ -36,9 +37,15 @@ export async function initDatabase() {
         role            VARCHAR(50) NOT NULL DEFAULT 'user',
         is_system_admin BOOLEAN NOT NULL DEFAULT false,
         is_active       BOOLEAN NOT NULL DEFAULT true,
+        token_version   INTEGER NOT NULL DEFAULT 1,
         created_at      TIMESTAMP DEFAULT NOW(),
         updated_at      TIMESTAMP DEFAULT NOW()
       );
+    `);
+
+    // ---- Migrate: add token_version to existing users tables ----
+    await client.query(`
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS token_version INTEGER NOT NULL DEFAULT 1;
     `);
 
     // ---- System settings ----
@@ -268,6 +275,7 @@ function rowToUser(row, { includeHash = false } = {}) {
     role: row.role,
     isSystemAdmin: row.is_system_admin,
     isActive: row.is_active,
+    tokenVersion: row.token_version ?? 1,
     createdAt: row.created_at ? row.created_at.toISOString() : null,
     updatedAt: row.updated_at ? row.updated_at.toISOString() : null
   };
@@ -332,10 +340,19 @@ export async function updateUser(id, { username, email, password, role, isActive
     const values = [];
     let p = 1;
 
+    // Fetch current values to detect role/active changes
+    const current = await client.query('SELECT role, is_active FROM users WHERE id = $1', [id]);
+    const cur = current.rows[0];
+    const roleChanged = cur && role !== undefined && role !== cur.role;
+    const deactivated = cur && isActive !== undefined && !isActive && cur.is_active;
+
     if (username !== undefined) { setClauses.push(`username = $${p++}`); values.push(username); }
     if (email !== undefined)    { setClauses.push(`email = $${p++}`);    values.push(email || null); }
     if (role !== undefined)     { setClauses.push(`role = $${p++}`);     values.push(role); }
     if (isActive !== undefined) { setClauses.push(`is_active = $${p++}`); values.push(isActive); }
+    if (roleChanged || deactivated) {
+      setClauses.push(`token_version = token_version + 1`);
+    }
     if (password !== undefined) {
       const hash = await bcrypt.hash(password, 10);
       setClauses.push(`password_hash = $${p++}`);
@@ -352,7 +369,9 @@ export async function updateUser(id, { username, email, password, role, isActive
       `UPDATE users SET ${setClauses.join(', ')} WHERE id = $${p} RETURNING *`,
       values
     );
-    return rowToUser(result.rows[0]);
+    const updated = rowToUser(result.rows[0]);
+    if (roleChanged || deactivated) emitUserInvalidated(String(id));
+    return updated;
   } finally {
     client.release();
   }

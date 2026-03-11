@@ -25,7 +25,8 @@ export const POST = withApiLogging(async function handler(req) {
     sub: String(user.id),
     username: user.username,
     role: user.role,
-    isSystemAdmin: user.isSystemAdmin
+    isSystemAdmin: user.isSystemAdmin,
+    tokenVersion: user.tokenVersion
   });
 
   const res = NextResponse.json({ user });
