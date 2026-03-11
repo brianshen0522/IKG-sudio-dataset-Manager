@@ -18,7 +18,7 @@ services:
       - POSTGRES_PASSWORD=studio
     restart: unless-stopped
 
-  IKG-studio-dataset-manager:
+  ikg-studio-dataset-manager:
     build: .
     container_name: IKG-studio-dataset-manager
     deploy:
