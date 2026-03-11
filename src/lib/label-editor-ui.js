@@ -115,6 +115,7 @@ import { initI18n, onLanguageChange, t } from '@/lib/i18n';
         let currentClassFile = '';
         let jobScopedImages = [];
         let jobScopedImageMeta = {};
+        let lastImageMissing = false; // true when last-viewed image no longer exists in list
 
         // Filter support
         let labelCache = {}; // Cache label info for filtering: { imagePath: { classes: [0,1,2], count: 3 } }
@@ -387,6 +388,7 @@ import { initI18n, onLanguageChange, t } from '@/lib/i18n';
             setupClassSelector();
             setupFilterUI();
             await loadSavedFilter();
+            applyFallbackForDeletedImage();
             setupEventListeners();
             updateInstructions(); // Initialize instructions based on default format
             updateNavigationButtons();
@@ -1168,9 +1170,25 @@ import { initI18n, onLanguageChange, t } from '@/lib/i18n';
                     const idx = imageList.findIndex(p => p.split('/').pop() === lastKnownImageParam);
                     if (idx >= 0) {
                         currentImageIndex = idx;
+                    } else {
+                        // Image not found — mark for fallback after sort mode is loaded
+                        lastImageMissing = true;
                     }
                 }
             }
+        }
+
+        // Called after loadSavedFilter so previewSortMode is correct.
+        // If the last-viewed image was deleted, find the nearest previous image in sorted order.
+        function applyFallbackForDeletedImage() {
+            if (!lastImageMissing || !lastKnownImageParam || imageList.length === 0) return;
+            const bare = lastKnownImageParam.split('/').pop() || lastKnownImageParam;
+            // Insert the deleted name into a virtual copy and sort it to find its position
+            const virtual = sortImageList([...imageList, bare]);
+            const deletedIdx = virtual.indexOf(bare);
+            // Go to the image just before the deleted one's position (or stay at 0)
+            currentImageIndex = Math.max(0, deletedIdx - 1);
+            lastImageMissing = false;
         }
 
         function normalizeStartImagePathForList(imagePath) {
