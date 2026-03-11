@@ -53,7 +53,7 @@ function rowToTask(row) {
     error: row.state === 'failed' || row.state === 'expired'
       ? (output.message || output.error || null)
       : null,
-    logs: Array.isArray(row.logs) ? row.logs : [],
+    logs: [],  // loaded lazily via /api/tasks/[id]/logs
   };
 }
 
@@ -73,15 +73,10 @@ const TASK_QUERY = `
     j.output,
     COALESCE(d.display_name, split_part(d.dataset_path, '/', -1)) AS dataset_name,
     d.dataset_path,
-    u.username AS created_by_username,
-    COALESCE(
-      json_agg(tl ORDER BY tl.ts ASC) FILTER (WHERE tl.id IS NOT NULL),
-      '[]'
-    ) AS logs
+    u.username AS created_by_username
   FROM pgboss.job j
   LEFT JOIN datasets d ON d.id = (j.data->>'datasetId')::integer
   LEFT JOIN users u ON u.id = (j.data->>'createdBy')::integer
-  LEFT JOIN task_logs tl ON tl.job_id = j.id
   WHERE j.name = 'duplicate-scan'
 `;
 
@@ -136,6 +131,41 @@ export async function appendTaskLog(jobId, level, message) {
       `INSERT INTO task_logs (job_id, level, message) VALUES ($1, $2, $3)`,
       [jobId, level, message]
     );
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Paginated log fetch for a task.
+ * Returns rows in ASC order (oldest first), limit 50 by default.
+ * - before: load older entries (id < before)
+ * - after:  load newer entries (id > after)
+ */
+export async function getTaskLogs(jobId, { limit = 50, before = null, after = null } = {}) {
+  await ensureInitialized();
+  const client = await getPool().connect();
+  try {
+    let query, params;
+    if (before != null) {
+      query = `SELECT id, ts, level, message FROM task_logs WHERE job_id = $1 AND id < $2 ORDER BY id DESC LIMIT $3`;
+      params = [jobId, before, limit];
+    } else if (after != null) {
+      query = `SELECT id, ts, level, message FROM task_logs WHERE job_id = $1 AND id > $2 ORDER BY id ASC LIMIT $3`;
+      params = [jobId, after, limit];
+    } else {
+      // initial load: last N rows, returned in ASC order
+      query = `SELECT * FROM (SELECT id, ts, level, message FROM task_logs WHERE job_id = $1 ORDER BY id DESC LIMIT $2) sub ORDER BY id ASC`;
+      params = [jobId, limit];
+    }
+    const result = await client.query(query, params);
+    // for 'before' queries the DB returns DESC; reverse to get ASC for display
+    const rows = before != null ? result.rows.reverse() : result.rows;
+    return rows.map((r) => ({ id: r.id, ts: r.ts, level: r.level, message: r.message }));
+  } catch (err) {
+    if (err.code === '42P01') return [];
+    console.error('[db-tasks] getTaskLogs error:', err.message);
+    throw err;
   } finally {
     client.release();
   }

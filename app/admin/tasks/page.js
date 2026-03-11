@@ -31,45 +31,114 @@ function duration(task) {
   return `${Math.floor(s / 60)}m ${s % 60}s`;
 }
 
-function LogBox({ logs }) {
-  const boxRef = useRef(null);
-  const bottomRef = useRef(null);
+const LOG_PAGE = 50;
+
+function LogBox({ taskId, taskStatus }) {
+  const boxRef       = useRef(null);
+  const [logs, setLogs]         = useState([]);
+  const [hasMore, setHasMore]   = useState(false);
+  const [loading, setLoading]   = useState(false);
   const [userScrolled, setUserScrolled] = useState(false);
 
-  // Auto-scroll to bottom when logs change, unless user has scrolled up
-  useEffect(() => {
-    if (!userScrolled && bottomRef.current) {
-      bottomRef.current.scrollIntoView({ behavior: 'smooth' });
-    }
-  }, [logs, userScrolled]);
+  // ids for pagination
+  const oldestId = logs.length > 0 ? logs[0].id        : null;
+  const newestId = logs.length > 0 ? logs[logs.length - 1].id : null;
+  const newestIdRef = useRef(newestId);
+  newestIdRef.current = newestId;
 
-  // Detect manual scroll
+  // initial load: fetch last N logs and scroll to bottom
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    fetch(`/api/tasks/${taskId}/logs?limit=${LOG_PAGE}`)
+      .then((r) => r.json())
+      .then((data) => {
+        if (cancelled) return;
+        const fetched = data.logs || [];
+        setLogs(fetched);
+        setHasMore(fetched.length === LOG_PAGE);
+        setLoading(false);
+        requestAnimationFrame(() => {
+          if (boxRef.current) boxRef.current.scrollTop = boxRef.current.scrollHeight;
+        });
+      })
+      .catch(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [taskId]);
+
+  // poll for newer logs while running
+  useEffect(() => {
+    if (taskStatus !== 'running') return;
+    const iv = setInterval(async () => {
+      const after = newestIdRef.current;
+      if (after == null) return;
+      try {
+        const r = await fetch(`/api/tasks/${taskId}/logs?limit=100&after=${after}`);
+        const data = await r.json();
+        const fetched = data.logs || [];
+        if (fetched.length === 0) return;
+        setLogs((prev) => [...prev, ...fetched]);
+        if (!userScrolled) {
+          requestAnimationFrame(() => {
+            if (boxRef.current) boxRef.current.scrollTop = boxRef.current.scrollHeight;
+          });
+        }
+      } catch {}
+    }, 2000);
+    return () => clearInterval(iv);
+  }, [taskId, taskStatus, userScrolled]);
+
+  // load older on scroll-to-top
+  const loadOlder = useCallback(async () => {
+    if (!hasMore || loading || oldestId == null) return;
+    setLoading(true);
+    try {
+      const r = await fetch(`/api/tasks/${taskId}/logs?limit=${LOG_PAGE}&before=${oldestId}`);
+      const data = await r.json();
+      const fetched = data.logs || [];
+      if (fetched.length === 0) { setHasMore(false); setLoading(false); return; }
+
+      const box = boxRef.current;
+      const prevScrollHeight = box?.scrollHeight || 0;
+      setLogs((prev) => [...fetched, ...prev]);
+      setHasMore(fetched.length === LOG_PAGE);
+      setLoading(false);
+      requestAnimationFrame(() => {
+        if (box) box.scrollTop = box.scrollHeight - prevScrollHeight;
+      });
+    } catch { setLoading(false); }
+  }, [taskId, hasMore, loading, oldestId]);
+
   const handleScroll = useCallback(() => {
     const el = boxRef.current;
     if (!el) return;
     const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 8;
     setUserScrolled(!atBottom);
-  }, []);
+    if (el.scrollTop < 40) loadOlder();
+  }, [loadOlder]);
 
   const scrollToBottom = () => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+    if (boxRef.current) boxRef.current.scrollTop = boxRef.current.scrollHeight;
     setUserScrolled(false);
   };
 
   return (
     <div style={{ position: 'relative' }}>
       <div ref={boxRef} style={s.logBox} onScroll={handleScroll}>
-        {logs.length === 0
+        {loading && <div style={s.logLoadingTop}>Loading…</div>}
+        {!loading && hasMore && (
+          <button style={s.loadOlderBtn} onClick={loadOlder}>↑ Load older</button>
+        )}
+        {logs.length === 0 && !loading
           ? <span style={s.logEmpty}>No logs yet.</span>
-          : logs.map((entry, i) => (
-            <div key={i} style={s.logLine}>
+          : logs.map((entry) => (
+            <div key={entry.id} style={s.logLine}>
               <span style={s.logTs}>{new Date(entry.ts).toLocaleTimeString()}</span>
               <span style={{ ...s.logLevel, color: LOG_COLOR[entry.level] || '#9ba9c3' }}>[{entry.level}]</span>
               <span style={s.logMsg}>{entry.message}</span>
             </div>
           ))
         }
-        <div ref={bottomRef} />
       </div>
       {userScrolled && (
         <button style={s.scrollDownBtn} onClick={scrollToBottom}>↓ Latest</button>
@@ -111,7 +180,7 @@ function TaskRow({ task }) {
             {task.completedAt && <span style={s.metaItem}><b>Finished:</b> {new Date(task.completedAt).toLocaleString()}</span>}
           </div>
           {task.error && <div style={s.taskError}>{task.error}</div>}
-          <LogBox logs={task.logs} />
+          <LogBox taskId={task.id} taskStatus={task.status} />
         </div>
       )}
     </div>
@@ -223,6 +292,12 @@ const s = {
   },
   streamError: { color: '#f87171', background: 'rgba(248,113,113,0.08)', border: '1px solid rgba(248,113,113,0.2)', borderRadius: '6px', padding: '10px 14px', marginBottom: '16px', fontSize: '13px' },
   logEmpty: { color: '#5a6a8a' },
+  logLoadingTop: { color: '#5a6a8a', fontSize: '11px', textAlign: 'center', padding: '4px 0 8px' },
+  loadOlderBtn: {
+    display: 'block', width: '100%', background: 'none', border: 'none',
+    color: '#5a6a8a', fontSize: '11px', cursor: 'pointer', padding: '4px 0 8px',
+    textAlign: 'center',
+  },
   scrollDownBtn: {
     position: 'absolute', bottom: '8px', right: '12px',
     background: '#1b2940', border: '1px solid #3a4f70', borderRadius: '20px',
