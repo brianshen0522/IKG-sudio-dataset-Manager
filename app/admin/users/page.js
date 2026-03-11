@@ -44,7 +44,7 @@ function UserModal({ user: editUser, onClose, onSaved }) {
   }
 
   return (
-    <div style={styles.modalOverlay} onClick={onClose}>
+    <div style={styles.modalOverlay}>
       <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
         <div style={styles.modalHeader}>
           <h3 style={styles.modalTitle}>{isNew ? 'Add User' : `Edit: ${editUser.username}`}</h3>

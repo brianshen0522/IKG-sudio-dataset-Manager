@@ -107,7 +107,10 @@ export default function FileBrowser({ mode = 'folder', fileFilter, value, onChan
       <div style={fb.panel} onClick={(e) => e.stopPropagation()}>
         <div style={fb.header}>
           <span style={fb.title}>{mode === 'folder' ? 'Select Folder' : 'Select File'}</span>
-          <button style={fb.closeBtn} onClick={onClose}>×</button>
+          <div style={fb.headerActions}>
+            <button style={fb.refreshBtn} onClick={() => browse(currentPath)} title="Refresh" disabled={loading}>⟳</button>
+            <button style={fb.closeBtn} onClick={onClose}>×</button>
+          </div>
         </div>
 
         {/* Breadcrumb */}
@@ -180,7 +183,12 @@ const fb = {
     display: 'flex', justifyContent: 'space-between', alignItems: 'center',
     padding: '14px 16px', borderBottom: '1px solid #25344d', flexShrink: 0,
   },
+  headerActions: { display: 'flex', alignItems: 'center', gap: '6px' },
   title: { fontSize: '14px', fontWeight: 700, color: '#e6edf7' },
+  refreshBtn: {
+    background: 'transparent', border: 'none', color: '#9ba9c3',
+    cursor: 'pointer', fontSize: '18px', lineHeight: 1, padding: '0 4px',
+  },
   closeBtn: { background: 'transparent', border: 'none', color: '#9ba9c3', cursor: 'pointer', fontSize: '20px', lineHeight: 1 },
   breadcrumb: {
     padding: '8px 16px', background: '#0d1626', borderBottom: '1px solid #1b2940',
