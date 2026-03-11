@@ -77,7 +77,7 @@ export default function AppHeader({ title, backHref, backLabel }) {
         )}
         {isAdminOrDM && (
           <button
-            style={{ ...styles.navBtn, ...(pathname?.startsWith('/admin/tasks') ? styles.navBtnActive : {}), position: 'relative' }}
+            style={{ ...styles.navBtn, ...(pathname?.startsWith('/admin/tasks') ? styles.navBtnActive : {}) }}
             onClick={() => router.push('/admin/tasks')}
           >
             Tasks
@@ -197,9 +197,8 @@ const styles = {
     color: '#e45d25',
   },
   taskBadge: {
-    position: 'absolute',
-    top: '3px',
-    right: '3px',
+    position: 'relative',
+    marginLeft: '5px',
     minWidth: '16px',
     height: '16px',
     borderRadius: '8px',
