@@ -4,7 +4,6 @@ import { useState, useEffect, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import AppHeader from './_components/AppHeader';
 import { useCurrentUser } from './_components/useCurrentUser';
-import FileBrowser from './_components/FileBrowser';
 import { subscribeSSE } from '@/lib/shared-sse';
 
 const STATUS_COLOR = {
@@ -72,402 +71,503 @@ function ProgressBar({ jobs }) {
 }
 
 function AddDatasetModal({ onClose, onCreated }) {
-  const [datasetPath, setDatasetPath] = useState('');
-  const [displayName, setDisplayName] = useState('');
-  const [classFile, setClassFile] = useState('');
-  const [classFilePreview, setClassFilePreview] = useState('');
-  const [classFilePreviewError, setClassFilePreviewError] = useState('');
-  const [classFilePreviewTruncated, setClassFilePreviewTruncated] = useState(false);
-  const [obbFormat, setObbFormat] = useState(false);
-  const [obbMode, setObbMode] = useState('rectangle');
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
-  const [showClassFileBrowser, setShowClassFileBrowser] = useState(false);
+  const [step, setStep] = useState(1); // 1=select, 2=review+settings
 
-  // Dataset type selection
+  // Type + subdirs
   const [datasetTypes, setDatasetTypes] = useState([]);
   const [typesLoading, setTypesLoading] = useState(true);
-  const [selectedTypeId, setSelectedTypeId] = useState('');       // '' = manual / no type
+  const [selectedTypeId, setSelectedTypeId] = useState('');
   const [availableSubdirs, setAvailableSubdirs] = useState([]);
   const [subdirsLoading, setSubdirsLoading] = useState(false);
-  const [selectedSubdir, setSelectedSubdir] = useState('');
+  const [selectedNames, setSelectedNames] = useState(new Set());
 
-  // Duplicate detection config
-  const [dupRule, setDupRule] = useState(null);         // auto-resolved from server
-  const [dupAction, setDupAction] = useState('');       // '' = use auto
-  const [dupLabels, setDupLabels] = useState('');       // '' = use auto
-  const [dupThreshold, setDupThreshold] = useState('');  // '' = use auto
-  const [dupDebug, setDupDebug] = useState(null);       // null = use auto
+  // Per-dataset class file (keyed by subdir name)
+  const [itemClassFiles, setItemClassFiles] = useState({});
+  const [classFilesLoading, setClassFilesLoading] = useState(false);
 
-  // Load dataset types on mount
+  // Shared settings
+  const [obbFormat, setObbFormat] = useState(false);
+  const [obbMode, setObbMode] = useState('rectangle');
+  const [dupConfigMode, setDupConfigMode] = useState('shared'); // 'shared' | 'individual'
+  const [dupAction, setDupAction] = useState('move');
+  const [dupLabels, setDupLabels] = useState(0);
+  const [dupThreshold, setDupThreshold] = useState(0.8);
+  const [dupDebug, setDupDebug] = useState(false);
+  // Per-dataset dup settings (individual mode)
+  const [itemDupSettings, setItemDupSettings] = useState({});
+  // Multi-select in review table for bulk dup edit
+  const [reviewSelected, setReviewSelected] = useState(new Set());
+  const [bulkDup, setBulkDup] = useState({ action: 'move', labels: 0, threshold: 0.8, debug: false });
+
+  const [loading, setLoading] = useState(false);
+  const [createResults, setCreateResults] = useState(null); // { succeeded[], failed[] }
+  const [error, setError] = useState('');
+
+  // Load types on mount
   useEffect(() => {
     let cancelled = false;
     fetch('/api/settings/dataset-types')
       .then((r) => r.ok ? r.json() : { types: [] })
-      .then((data) => { if (!cancelled) { setDatasetTypes(data.types || []); setTypesLoading(false); } })
+      .then((data) => {
+        if (!cancelled) {
+          const types = data.types || [];
+          setDatasetTypes(types);
+          if (types.length === 1) setSelectedTypeId(String(types[0].id));
+          setTypesLoading(false);
+        }
+      })
       .catch(() => { if (!cancelled) setTypesLoading(false); });
     return () => { cancelled = true; };
   }, []);
 
-  // Load available subdirs when type is selected
+  // Load subdirs when type changes
   useEffect(() => {
-    if (!selectedTypeId) {
-      setAvailableSubdirs([]);
-      setSelectedSubdir('');
-      return;
-    }
+    if (!selectedTypeId) { setAvailableSubdirs([]); setSelectedNames(new Set()); return; }
     let cancelled = false;
     setSubdirsLoading(true);
-    setSelectedSubdir('');
+    setSelectedNames(new Set());
     fetch(`/api/settings/dataset-types/${selectedTypeId}/available-datasets`)
       .then((r) => r.ok ? r.json() : { available: [] })
-      .then((data) => {
-        if (!cancelled) {
-          setAvailableSubdirs(data.available || []);
-          setSubdirsLoading(false);
-        }
-      })
+      .then((data) => { if (!cancelled) { setAvailableSubdirs(data.available || []); setSubdirsLoading(false); } })
       .catch(() => { if (!cancelled) setSubdirsLoading(false); });
     return () => { cancelled = true; };
   }, [selectedTypeId]);
 
-  // When subdir is selected, auto-fill path, display name, and class file
-  useEffect(() => {
-    if (!selectedSubdir) return;
-    const found = availableSubdirs.find((s) => s.name === selectedSubdir);
-    if (!found) return;
-    setDatasetPath(found.path);
-    setDisplayName(found.name);
-    // Auto-detect class file (same as DatasetBrowser)
-    fetch(`/api/auto-find-classes?path=${encodeURIComponent(found.path)}`)
-      .then((r) => r.ok ? r.json() : {})
-      .then((data) => { setClassFile(data.classFile || ''); })
-      .catch(() => {});
-  }, [selectedSubdir, availableSubdirs]);
-
-  useEffect(() => {
-    let cancelled = false;
-
-    async function loadClassFilePreview() {
-      const trimmed = classFile.trim();
-      if (!trimmed) {
-        setClassFilePreview('');
-        setClassFilePreviewError('');
-        setClassFilePreviewTruncated(false);
-        return;
-      }
-
-      if (!trimmed.toLowerCase().endsWith('.txt')) {
-        setClassFilePreview('');
-        setClassFilePreviewError('Preview is available for .txt files only.');
-        setClassFilePreviewTruncated(false);
-        return;
-      }
-
-      try {
-        const res = await fetch(`/api/class-file?path=${encodeURIComponent(trimmed)}`);
-        const data = await res.json();
-        if (cancelled) return;
-        if (!res.ok) {
-          setClassFilePreview('');
-          setClassFilePreviewError(data.error || 'Failed to load preview');
-          setClassFilePreviewTruncated(false);
-          return;
-        }
-        setClassFilePreview(data.content || '');
-        setClassFilePreviewError('');
-        setClassFilePreviewTruncated(Boolean(data.truncated));
-      } catch {
-        if (cancelled) return;
-        setClassFilePreview('');
-        setClassFilePreviewError('Failed to load preview');
-        setClassFilePreviewTruncated(false);
-      }
-    }
-
-    loadClassFilePreview();
-    return () => {
-      cancelled = true;
-    };
-  }, [classFile]);
-
-  // Fetch matching duplicate rule whenever path changes
-  useEffect(() => {
-    const trimmed = datasetPath.trim();
-    if (!trimmed) { setDupRule(null); return; }
-    let cancelled = false;
-    fetch(`/api/duplicate-rule?path=${encodeURIComponent(trimmed)}`)
-      .then((r) => r.ok ? r.json() : null)
-      .then((data) => { if (!cancelled && data) setDupRule(data); })
-      .catch(() => {});
-    return () => { cancelled = true; };
-  }, [datasetPath]);
-
-  function resetDupOverrides() {
-    setDupAction('');
-    setDupLabels('');
-    setDupThreshold('');
-    setDupDebug(null);
+  function toggleName(name) {
+    setSelectedNames((prev) => {
+      const next = new Set(prev);
+      next.has(name) ? next.delete(name) : next.add(name);
+      return next;
+    });
   }
 
-  const effectiveAction    = dupAction    || dupRule?.action    || 'move';
-  const effectiveLabels    = dupLabels    !== '' ? Number(dupLabels)    : (dupRule?.labels    ?? 0);
-  const effectiveThreshold = dupThreshold !== '' ? Number(dupThreshold) : (dupRule?.iouThreshold ?? 0.8);
-  const effectiveDebug     = dupDebug     !== null ? dupDebug            : (dupRule?.debug      ?? false);
+  function toggleAll() {
+    if (selectedNames.size === availableSubdirs.length) {
+      setSelectedNames(new Set());
+    } else {
+      setSelectedNames(new Set(availableSubdirs.map((s) => s.name)));
+    }
+  }
 
-  const isTypeMode = !!selectedTypeId;
+  async function goToReview() {
+    setClassFilesLoading(true);
+    const files = {};
+    await Promise.all(
+      [...selectedNames].map(async (name) => {
+        const found = availableSubdirs.find((s) => s.name === name);
+        if (!found) return;
+        try {
+          const r = await fetch(`/api/auto-find-classes?path=${encodeURIComponent(found.path)}`);
+          const d = await r.json();
+          files[name] = d.classFile || '';
+        } catch { files[name] = ''; }
+      })
+    );
+    setItemClassFiles(files);
+    // Init per-item dup from shared
+    const dups = {};
+    for (const name of selectedNames) {
+      dups[name] = { action: dupAction, labels: dupLabels, threshold: dupThreshold, debug: dupDebug };
+    }
+    setItemDupSettings(dups);
+    setReviewSelected(new Set());
+    setClassFilesLoading(false);
+    setStep(2);
+  }
 
-  async function handleSubmit(e) {
-    e.preventDefault();
-    setError('');
+  async function handleCreate() {
     setLoading(true);
-    try {
-      const res = await fetch('/api/datasets', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          datasetPath: datasetPath.trim(),
-          displayName: displayName.trim() || undefined,
-          classFile: classFile.trim() || null,
-          pentagonFormat: obbFormat,
-          obbMode: obbFormat ? obbMode : 'rectangle',
-          duplicateMode: effectiveAction,
-          duplicateLabels: effectiveLabels,
-          threshold: effectiveThreshold,
-          debug: effectiveDebug,
-          typeId: selectedTypeId ? Number(selectedTypeId) : null,
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) { setError(data.error || 'Failed to create dataset'); return; }
-      onCreated(data.dataset);
-    } catch {
-      setError('Network error');
-    } finally {
-      setLoading(false);
+    setError('');
+    const succeeded = [], failed = [];
+    for (const name of selectedNames) {
+      const found = availableSubdirs.find((s) => s.name === name);
+      if (!found) continue;
+      try {
+        const res = await fetch('/api/datasets', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            datasetPath: found.path,
+            displayName: name,
+            classFile: itemClassFiles[name] || null,
+            pentagonFormat: obbFormat,
+            obbMode: obbFormat ? obbMode : 'rectangle',
+            duplicateMode: dupConfigMode === 'individual' ? (itemDupSettings[name]?.action ?? dupAction) : dupAction,
+            duplicateLabels: Number(dupConfigMode === 'individual' ? (itemDupSettings[name]?.labels ?? dupLabels) : dupLabels),
+            threshold: Number(dupConfigMode === 'individual' ? (itemDupSettings[name]?.threshold ?? dupThreshold) : dupThreshold),
+            debug: dupConfigMode === 'individual' ? (itemDupSettings[name]?.debug ?? dupDebug) : dupDebug,
+            typeId: Number(selectedTypeId),
+          }),
+        });
+        const data = await res.json();
+        if (res.ok) succeeded.push(data.dataset);
+        else failed.push({ name, error: data.error || 'Failed' });
+      } catch {
+        failed.push({ name, error: 'Network error' });
+      }
+    }
+    setLoading(false);
+    if (failed.length === 0) {
+      succeeded.forEach(onCreated);
+      onClose();
+    } else {
+      setCreateResults({ succeeded, failed });
+      succeeded.forEach(onCreated);
     }
   }
+
+  const allSelected = availableSubdirs.length > 0 && selectedNames.size === availableSubdirs.length;
+  const someSelected = selectedNames.size > 0 && selectedNames.size < availableSubdirs.length;
 
   return (
-    <>
-    <div style={styles.modalOverlay}>
-      <div style={{ ...styles.modal, maxWidth: '520px', maxHeight: '90vh', overflowY: 'auto' }} onClick={(e) => e.stopPropagation()}>
+    <div style={styles.modalOverlay} onClick={onClose}>
+      <div style={{ ...styles.modal, maxWidth: '600px', maxHeight: '90vh', overflowY: 'auto' }} onClick={(e) => e.stopPropagation()}>
         <div style={styles.modalHeader}>
-          <h2 style={styles.modalTitle}>Add Dataset</h2>
+          <div>
+            <h2 style={styles.modalTitle}>Add Datasets</h2>
+            <div style={{ display: 'flex', gap: '6px', marginTop: '4px' }}>
+              {[1, 2].map((n) => (
+                <span key={n} style={{ fontSize: '11px', fontWeight: 700, padding: '2px 8px', borderRadius: '20px',
+                  background: step === n ? '#e45d2522' : '#1b294022',
+                  color: step === n ? '#e45d25' : '#5a6a8a',
+                  border: `1px solid ${step === n ? '#e45d2544' : '#25344d'}` }}>
+                  {n === 1 ? '1. Select' : '2. Review & Create'}
+                </span>
+              ))}
+            </div>
+          </div>
           <button style={styles.closeBtn} onClick={onClose}>×</button>
         </div>
-        <form onSubmit={handleSubmit} style={styles.form}>
 
-          {/* Dataset Type selector — only shown when types exist */}
-          {!typesLoading && datasetTypes.length > 0 && (
+        {/* ── STEP 1: Type + multi-select subdirs ── */}
+        {step === 1 && (
+          <div style={styles.form}>
+            {/* Type selector */}
             <div style={styles.field}>
-              <label style={styles.label}>Dataset Type</label>
-              <select
-                style={styles.select}
-                value={selectedTypeId}
-                onChange={(e) => {
-                  setSelectedTypeId(e.target.value);
-                  if (!e.target.value) {
-                    setDatasetPath('');
-                    setDisplayName('');
-                  }
-                }}
-              >
-                <option value="">None / Manual path</option>
-                {datasetTypes.map((t) => (
-                  <option key={t.id} value={t.id}>{t.name}</option>
-                ))}
-              </select>
-            </div>
-          )}
-
-          {/* Subdir picker when type is selected */}
-          {isTypeMode && (
-            <div style={styles.field}>
-              <label style={styles.label}>Dataset Subdirectory *</label>
-              {subdirsLoading ? (
-                <p style={{ color: '#9ba9c3', fontSize: '12px' }}>Loading available datasets…</p>
-              ) : availableSubdirs.length === 0 ? (
-                <p style={{ color: '#f1b11a', fontSize: '12px' }}>No available datasets found in uncheck path.</p>
+              <label style={styles.label}>Dataset Type *</label>
+              {typesLoading ? (
+                <p style={{ color: '#9ba9c3', fontSize: '12px' }}>Loading types…</p>
+              ) : datasetTypes.length === 0 ? (
+                <p style={{ color: '#f1b11a', fontSize: '13px' }}>No dataset types configured. Add one in Settings first.</p>
               ) : (
-                <select
-                  style={styles.select}
-                  value={selectedSubdir}
-                  onChange={(e) => setSelectedSubdir(e.target.value)}
-                  required
-                >
-                  <option value="">Select a dataset…</option>
-                  {availableSubdirs.map((s) => (
-                    <option key={s.name} value={s.name}>
-                      {s.name}{s.imageCount != null ? ` — ${s.imageCount} images` : ''}
-                    </option>
-                  ))}
+                <select style={styles.select} value={selectedTypeId} onChange={(e) => setSelectedTypeId(e.target.value)} required>
+                  <option value="">Select a type…</option>
+                  {datasetTypes.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
                 </select>
               )}
-              {selectedSubdir && (
-                <small style={styles.hint}>Path: {datasetPath}</small>
-              )}
             </div>
-          )}
 
-          <div style={styles.field}>
-            <label style={styles.label}>Display Name</label>
-            <input
-              style={styles.input}
-              value={displayName}
-              onChange={(e) => setDisplayName(e.target.value)}
-              placeholder="Dataset name"
-              autoFocus={!isTypeMode}
-            />
-          </div>
-
-
-          <div style={styles.field}>
-            <label style={styles.label}>Class Names File</label>
-            <div style={styles.inputRow}>
-              <input
-                style={{ ...styles.input, flex: 1 }}
-                value={classFile}
-                onChange={(e) => setClassFile(e.target.value)}
-                placeholder="/data/my-dataset/classes.txt"
-              />
-              <button type="button" style={styles.browseBtn} onClick={() => setShowClassFileBrowser(true)}>Browse</button>
-            </div>
-            <small style={styles.hint}>Path to a .txt file with one class name per line</small>
-            {(classFilePreview || classFilePreviewError) && (
-              <div style={styles.previewBox}>
-                <div style={styles.previewHeader}>
-                  <span style={styles.previewTitle}>Preview</span>
-                  {classFilePreviewTruncated && <span style={styles.previewMeta}>Truncated</span>}
-                </div>
-                {classFilePreviewError ? (
-                  <p style={styles.previewError}>{classFilePreviewError}</p>
+            {/* Subdir multi-select list */}
+            {selectedTypeId && (
+              <div style={styles.field}>
+                <label style={styles.label}>
+                  Select Datasets
+                  {availableSubdirs.length > 0 && (
+                    <span style={{ color: '#5a6a8a', fontWeight: 400, marginLeft: '8px' }}>
+                      {selectedNames.size} / {availableSubdirs.length} selected
+                    </span>
+                  )}
+                </label>
+                {subdirsLoading ? (
+                  <p style={{ color: '#9ba9c3', fontSize: '12px' }}>Loading available datasets…</p>
+                ) : availableSubdirs.length === 0 ? (
+                  <p style={{ color: '#f1b11a', fontSize: '12px' }}>No available datasets found in uncheck path.</p>
                 ) : (
-                  <pre style={styles.previewContent}>{classFilePreview}</pre>
+                  <div style={{ border: '1px solid #25344d', borderRadius: '8px', overflow: 'hidden' }}>
+                    {/* Select all header */}
+                    <label style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '8px 12px',
+                      background: '#1b2940', borderBottom: '1px solid #25344d', cursor: 'pointer' }}>
+                      <input
+                        type="checkbox"
+                        checked={allSelected}
+                        ref={(el) => { if (el) el.indeterminate = someSelected; }}
+                        onChange={toggleAll}
+                        style={styles.checkbox}
+                      />
+                      <span style={{ fontSize: '12px', color: '#9ba9c3', fontWeight: 600 }}>Select All</span>
+                    </label>
+                    {/* Subdir rows */}
+                    <div style={{ maxHeight: '240px', overflowY: 'auto' }}>
+                      {availableSubdirs.map((s) => (
+                        <label key={s.name} style={{ display: 'flex', alignItems: 'center', gap: '10px',
+                          padding: '8px 12px', cursor: 'pointer',
+                          background: selectedNames.has(s.name) ? 'rgba(228,93,37,0.06)' : 'transparent',
+                          borderBottom: '1px solid #1b2940' }}>
+                          <input
+                            type="checkbox"
+                            checked={selectedNames.has(s.name)}
+                            onChange={() => toggleName(s.name)}
+                            style={styles.checkbox}
+                          />
+                          <span style={{ flex: 1, fontSize: '13px', color: '#e6edf7' }}>{s.name}</span>
+                          {s.imageCount != null && (
+                            <span style={{ fontSize: '11px', color: '#5a6a8a', fontFamily: 'monospace' }}>
+                              {s.imageCount} imgs
+                            </span>
+                          )}
+                        </label>
+                      ))}
+                    </div>
+                  </div>
                 )}
               </div>
             )}
-          </div>
 
-          <div style={styles.sectionDivider} />
-
-          <div style={styles.field}>
-            <label style={styles.checkboxRow}>
-              <input
-                type="checkbox"
-                checked={obbFormat}
-                onChange={(e) => setObbFormat(e.target.checked)}
-                style={styles.checkbox}
-              />
-              <span style={styles.checkboxLabel}>OBB Format (Polygon)</span>
-            </label>
-            <small style={styles.hint}>
-              Convert YOLO bounding boxes to OBB format (4 points, clockwise from top-left)
-            </small>
-          </div>
-
-          {obbFormat && (
-            <div style={styles.field}>
-              <label style={styles.label}>OBB Creation Mode</label>
-              <select style={styles.select} value={obbMode} onChange={(e) => setObbMode(e.target.value)}>
-                <option value="rectangle">Rectangle (axis-aligned → 4-point)</option>
-                <option value="4point">4-Point (free polygon)</option>
-              </select>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', marginTop: '8px' }}>
+              <button style={styles.cancelBtn} type="button" onClick={onClose}>Cancel</button>
+              <button
+                style={{ ...styles.submitBtn, opacity: selectedNames.size === 0 || classFilesLoading ? 0.5 : 1 }}
+                type="button"
+                disabled={selectedNames.size === 0 || classFilesLoading}
+                onClick={goToReview}
+              >
+                {classFilesLoading ? 'Loading…' : `Next → (${selectedNames.size} selected)`}
+              </button>
             </div>
-          )}
+          </div>
+        )}
 
-          <div style={styles.sectionDivider} />
+        {/* ── STEP 2: Review list + shared settings ── */}
+        {step === 2 && (
+          <div style={styles.form}>
+            {/* Review table */}
+            <div style={styles.field}>
+              <label style={styles.label}>Datasets to Create ({selectedNames.size})</label>
+              <div style={{ border: '1px solid #25344d', borderRadius: '8px', overflow: 'hidden' }}>
+                <div style={{ display: 'grid', gridTemplateColumns: dupConfigMode === 'individual' ? '24px 1fr 1fr' : '1fr 1fr', gap: 0,
+                  background: '#1b2940', borderBottom: '1px solid #25344d', padding: '6px 12px' }}>
+                  {dupConfigMode === 'individual' && <span />}
+                  <span style={{ fontSize: '11px', color: '#5a6a8a', fontWeight: 600, textTransform: 'uppercase' }}>Name</span>
+                  <span style={{ fontSize: '11px', color: '#5a6a8a', fontWeight: 600, textTransform: 'uppercase' }}>Class File</span>
+                </div>
+                <div style={{ maxHeight: '220px', overflowY: 'auto' }}>
+                  {[...selectedNames].map((name) => {
+                    const s = availableSubdirs.find((x) => x.name === name);
+                    const isel = reviewSelected.has(name);
+                    return (
+                      <div key={name}>
+                        <div style={{ display: 'grid',
+                          gridTemplateColumns: dupConfigMode === 'individual' ? '24px 1fr 1fr' : '1fr 1fr',
+                          gap: '8px', padding: '8px 12px', borderBottom: '1px solid #1b2940', alignItems: 'center',
+                          background: isel ? 'rgba(228,93,37,0.06)' : 'transparent' }}>
+                          {dupConfigMode === 'individual' && (
+                            <input type="checkbox" checked={isel} style={styles.checkbox}
+                              onChange={() => setReviewSelected((p) => { const n = new Set(p); n.has(name) ? n.delete(name) : n.add(name); return n; })} />
+                          )}
+                          <div>
+                            <span style={{ fontSize: '13px', color: '#e6edf7', fontWeight: 600 }}>{name}</span>
+                            {s?.imageCount != null && (
+                              <span style={{ fontSize: '11px', color: '#5a6a8a', marginLeft: '8px' }}>{s.imageCount} imgs</span>
+                            )}
+                            {dupConfigMode === 'individual' && (
+                              <div style={{ marginTop: '4px', display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                                <select style={{ ...styles.select, fontSize: '11px', padding: '2px 6px' }}
+                                  value={itemDupSettings[name]?.action ?? 'move'}
+                                  onChange={(e) => setItemDupSettings((p) => ({ ...p, [name]: { ...p[name], action: e.target.value } }))}>
+                                  <option value="move">Move dups</option>
+                                  <option value="delete">Delete dups</option>
+                                  <option value="skip">Skip detection</option>
+                                </select>
+                                <input style={{ ...styles.input, width: '60px', fontSize: '11px', padding: '2px 6px' }}
+                                  type="number" min="0" max="1" step="0.05" title="IoU Threshold"
+                                  value={itemDupSettings[name]?.threshold ?? 0.8}
+                                  onChange={(e) => setItemDupSettings((p) => ({ ...p, [name]: { ...p[name], threshold: e.target.value } }))} />
+                                <input style={{ ...styles.input, width: '50px', fontSize: '11px', padding: '2px 6px' }}
+                                  type="number" min="0" step="1" title="Labels Limit (0=all)"
+                                  value={itemDupSettings[name]?.labels ?? 0}
+                                  onChange={(e) => setItemDupSettings((p) => ({ ...p, [name]: { ...p[name], labels: e.target.value } }))} />
+                                <label style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '11px', color: '#9ba9c3', cursor: 'pointer' }}>
+                                  <input type="checkbox" style={styles.checkbox}
+                                    checked={itemDupSettings[name]?.debug ?? false}
+                                    onChange={(e) => setItemDupSettings((p) => ({ ...p, [name]: { ...p[name], debug: e.target.checked } }))} />
+                                  Debug
+                                </label>
+                              </div>
+                            )}
+                          </div>
+                          <input
+                            style={{ ...styles.input, fontSize: '12px', padding: '4px 8px' }}
+                            value={itemClassFiles[name] || ''}
+                            onChange={(e) => setItemClassFiles((prev) => ({ ...prev, [name]: e.target.value }))}
+                            placeholder="auto / none"
+                          />
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
 
-          {/* Duplicate Detection Config */}
-          <div style={styles.field}>
-            <div style={styles.dupHeader}>
-              <span style={styles.label}>Duplicate Detection</span>
-              {dupRule && (
-                <span style={styles.dupBadge}>
-                  {dupRule.matchedPattern
-                    ? <>matched: <code style={styles.dupCode}>{dupRule.matchedPattern}</code></>
-                    : 'default'}
-                </span>
+            {/* Bulk-edit panel for individual mode when rows selected */}
+            {dupConfigMode === 'individual' && reviewSelected.size > 0 && (
+              <div style={{ background: 'rgba(228,93,37,0.06)', border: '1px solid rgba(228,93,37,0.2)', borderRadius: '8px', padding: '12px 14px', marginBottom: '8px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
+                  <span style={{ fontSize: '12px', color: '#e45d25', fontWeight: 700 }}>
+                    Bulk Edit — {reviewSelected.size} selected
+                  </span>
+                  <button type="button" style={{ ...styles.cancelBtn, fontSize: '11px', padding: '2px 10px' }}
+                    onClick={() => setReviewSelected(new Set())}>Clear</button>
+                </div>
+                <div style={styles.dupGrid}>
+                  <div style={styles.dupField}>
+                    <label style={styles.dupLabel}>Action</label>
+                    <select style={styles.select} value={bulkDup.action} onChange={(e) => setBulkDup((p) => ({ ...p, action: e.target.value }))}>
+                      <option value="move">Move to duplicate/</option>
+                      <option value="delete">Delete</option>
+                      <option value="skip">Skip (no detection)</option>
+                    </select>
+                  </div>
+                  <div style={styles.dupField}>
+                    <label style={styles.dupLabel}>IoU Threshold</label>
+                    <input style={styles.input} type="number" min="0" max="1" step="0.05"
+                      value={bulkDup.threshold} onChange={(e) => setBulkDup((p) => ({ ...p, threshold: e.target.value }))} />
+                  </div>
+                  <div style={styles.dupField}>
+                    <label style={styles.dupLabel}>Labels Limit <small style={styles.dupMeta}>(0=all)</small></label>
+                    <input style={styles.input} type="number" min="0" step="1"
+                      value={bulkDup.labels} onChange={(e) => setBulkDup((p) => ({ ...p, labels: e.target.value }))} />
+                  </div>
+                  <div style={styles.dupField}>
+                    <label style={styles.checkboxRow}>
+                      <input type="checkbox" style={styles.checkbox} checked={bulkDup.debug} onChange={(e) => setBulkDup((p) => ({ ...p, debug: e.target.checked }))} />
+                      <span style={styles.dupLabel}>Debug</span>
+                    </label>
+                  </div>
+                </div>
+                <button type="button"
+                  style={{ ...styles.submitBtn, marginTop: '10px', background: '#e45d25', padding: '7px 16px', fontSize: '12px' }}
+                  onClick={() => {
+                    setItemDupSettings((prev) => {
+                      const next = { ...prev };
+                      for (const name of reviewSelected) next[name] = { ...bulkDup };
+                      return next;
+                    });
+                    setReviewSelected(new Set());
+                  }}>
+                  Apply to {reviewSelected.size} Selected
+                </button>
+              </div>
+            )}
+
+            <div style={styles.sectionDivider} />
+
+            {/* OBB format */}
+            <div style={styles.field}>
+              <label style={styles.checkboxRow}>
+                <input type="checkbox" checked={obbFormat} onChange={(e) => setObbFormat(e.target.checked)} style={styles.checkbox} />
+                <span style={styles.checkboxLabel}>OBB Format (Polygon)</span>
+              </label>
+            </div>
+            {obbFormat && (
+              <div style={styles.field}>
+                <label style={styles.label}>OBB Creation Mode</label>
+                <select style={styles.select} value={obbMode} onChange={(e) => setObbMode(e.target.value)}>
+                  <option value="rectangle">Rectangle (axis-aligned → 4-point)</option>
+                  <option value="4point">4-Point (free polygon)</option>
+                </select>
+              </div>
+            )}
+
+            <div style={styles.sectionDivider} />
+
+            {/* Dup detection mode toggle + settings */}
+            <div style={styles.field}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '10px' }}>
+                <span style={styles.label}>Duplicate Detection</span>
+                <div style={{ display: 'flex', border: '1px solid #25344d', borderRadius: '6px', overflow: 'hidden', marginLeft: 'auto' }}>
+                  {['shared', 'individual'].map((mode) => (
+                    <button key={mode} type="button"
+                      style={{ padding: '4px 14px', fontSize: '12px', fontWeight: 600, border: 'none', cursor: 'pointer',
+                        background: dupConfigMode === mode ? '#e45d25' : 'transparent',
+                        color: dupConfigMode === mode ? '#fff' : '#9ba9c3' }}
+                      onClick={() => {
+                        setDupConfigMode(mode);
+                        if (mode === 'individual') {
+                          // Sync individual from current shared values
+                          const dups = {};
+                          for (const name of selectedNames) {
+                            dups[name] = { action: dupAction, labels: dupLabels, threshold: dupThreshold, debug: dupDebug };
+                          }
+                          setItemDupSettings(dups);
+                        }
+                        setReviewSelected(new Set());
+                      }}>
+                      {mode === 'shared' ? 'Apply to All' : 'Per Dataset'}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              {dupConfigMode === 'shared' && (
+                <div style={styles.dupGrid}>
+                  <div style={styles.dupField}>
+                    <label style={styles.dupLabel}>Action</label>
+                    <select style={styles.select} value={dupAction} onChange={(e) => setDupAction(e.target.value)}>
+                      <option value="move">Move to duplicate/</option>
+                      <option value="delete">Delete</option>
+                      <option value="skip">Skip (no detection)</option>
+                    </select>
+                  </div>
+                  <div style={styles.dupField}>
+                    <label style={styles.dupLabel}>IoU Threshold</label>
+                    <input style={styles.input} type="number" min="0" max="1" step="0.05"
+                      value={dupThreshold} onChange={(e) => setDupThreshold(e.target.value)} />
+                  </div>
+                  <div style={styles.dupField}>
+                    <label style={styles.dupLabel}>Labels Limit <small style={styles.dupMeta}>(0 = all)</small></label>
+                    <input style={styles.input} type="number" min="0" step="1"
+                      value={dupLabels} onChange={(e) => setDupLabels(e.target.value)} />
+                  </div>
+                  <div style={styles.dupField}>
+                    <label style={styles.checkboxRow}>
+                      <input type="checkbox" style={styles.checkbox} checked={dupDebug} onChange={(e) => setDupDebug(e.target.checked)} />
+                      <span style={styles.dupLabel}>Debug mode</span>
+                    </label>
+                  </div>
+                </div>
               )}
-              {(dupAction || dupLabels !== '' || dupThreshold !== '' || dupDebug !== null) && (
-                <button type="button" style={styles.dupResetBtn} onClick={resetDupOverrides}>
-                  Reset to auto
+              {dupConfigMode === 'individual' && (
+                <p style={{ fontSize: '12px', color: '#5a6a8a', margin: 0 }}>
+                  Edit each dataset's settings in the table above. Select multiple rows to bulk-edit.
+                </p>
+              )}
+            </div>
+
+            {/* Results after partial failure */}
+            {createResults && (
+              <div style={{ marginBottom: '12px' }}>
+                {createResults.succeeded.length > 0 && (
+                  <p style={{ color: '#20c25a', fontSize: '13px', margin: '0 0 6px' }}>
+                    ✓ {createResults.succeeded.length} dataset{createResults.succeeded.length !== 1 ? 's' : ''} created successfully.
+                  </p>
+                )}
+                {createResults.failed.map((f) => (
+                  <p key={f.name} style={{ color: '#f87171', fontSize: '13px', margin: '0 0 4px' }}>
+                    ✗ {f.name}: {f.error}
+                  </p>
+                ))}
+              </div>
+            )}
+
+            {error && <p style={styles.errorMsg}>{error}</p>}
+
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', marginTop: '8px' }}>
+              {!createResults && (
+                <button style={styles.cancelBtn} type="button" onClick={() => setStep(1)}>← Back</button>
+              )}
+              {createResults ? (
+                <button style={styles.submitBtn} type="button" onClick={onClose}>Close</button>
+              ) : (
+                <button style={{ ...styles.submitBtn, opacity: loading ? 0.6 : 1 }} type="button"
+                  disabled={loading} onClick={handleCreate}>
+                  {loading ? 'Creating…' : `Create ${selectedNames.size} Dataset${selectedNames.size !== 1 ? 's' : ''}`}
                 </button>
               )}
             </div>
-
-            <div style={styles.dupGrid}>
-              <div style={styles.dupField}>
-                <label style={styles.dupLabel}>Action</label>
-                <select
-                  style={styles.select}
-                  value={dupAction || effectiveAction}
-                  onChange={(e) => setDupAction(e.target.value)}
-                >
-                  <option value="move">Move to duplicate/</option>
-                  <option value="delete">Delete</option>
-                  <option value="skip">Skip (no detection)</option>
-                </select>
-              </div>
-
-              <div style={styles.dupField}>
-                <label style={styles.dupLabel}>IoU Threshold</label>
-                <input
-                  style={styles.input}
-                  type="number"
-                  min="0" max="1" step="0.05"
-                  value={dupThreshold !== '' ? dupThreshold : effectiveThreshold}
-                  onChange={(e) => setDupThreshold(e.target.value)}
-                />
-              </div>
-
-              <div style={styles.dupField}>
-                <label style={styles.dupLabel}>Labels Limit <small style={styles.dupMeta}>(0 = all)</small></label>
-                <input
-                  style={styles.input}
-                  type="number"
-                  min="0" step="1"
-                  value={dupLabels !== '' ? dupLabels : effectiveLabels}
-                  onChange={(e) => setDupLabels(e.target.value)}
-                />
-              </div>
-
-              <div style={styles.dupField}>
-                <label style={styles.checkboxRow}>
-                  <input
-                    type="checkbox"
-                    style={styles.checkbox}
-                    checked={effectiveDebug}
-                    onChange={(e) => setDupDebug(e.target.checked)}
-                  />
-                  <span style={styles.dupLabel}>Debug mode</span>
-                </label>
-              </div>
-            </div>
-
-            {effectiveAction === 'skip' && (
-              <p style={styles.dupSkipNote}>Duplicate detection will be skipped for this dataset.</p>
-            )}
           </div>
-
-          {error && <p style={styles.errorMsg}>{error}</p>}
-          <button type="submit" style={styles.submitBtn} disabled={loading || (isTypeMode && !selectedSubdir)}>
-            {loading ? 'Creating…' : 'Create Dataset'}
-          </button>
-        </form>
+        )}
       </div>
     </div>
-
-      {showClassFileBrowser && (
-        <FileBrowser
-          mode="file"
-          fileFilter={(f) => f.endsWith('.txt') || f.endsWith('.names') || f.endsWith('.yaml') || f.endsWith('.yml')}
-          value={classFile}
-          onChange={setClassFile}
-          onClose={() => setShowClassFileBrowser(false)}
-        />
-      )}
-    </>
   );
 }
 
