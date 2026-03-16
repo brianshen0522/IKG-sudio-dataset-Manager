@@ -85,6 +85,10 @@ function AddDatasetModal({ onClose, onCreated }) {
   const [itemClassFiles, setItemClassFiles] = useState({});
   const [classFilesLoading, setClassFilesLoading] = useState(false);
 
+  // Users list for assignment
+  const [users, setUsers] = useState([]);
+  const [assignToUserId, setAssignToUserId] = useState('');
+
   // Shared settings
   const [obbFormat, setObbFormat] = useState(false);
   const [obbMode, setObbMode] = useState('rectangle');
@@ -102,6 +106,14 @@ function AddDatasetModal({ onClose, onCreated }) {
   const [loading, setLoading] = useState(false);
   const [createResults, setCreateResults] = useState(null); // { succeeded[], failed[] }
   const [error, setError] = useState('');
+
+  // Load users for assignment
+  useEffect(() => {
+    fetch('/api/users')
+      .then((r) => r.ok ? r.json() : { users: [] })
+      .then((d) => setUsers((d.users || []).filter((u) => u.role === 'user' || u.role === 'data-manager')))
+      .catch(() => {});
+  }, []);
 
   // Load types on mount
   useEffect(() => {
@@ -200,8 +212,26 @@ function AddDatasetModal({ onClose, onCreated }) {
           }),
         });
         const data = await res.json();
-        if (res.ok) succeeded.push(data.dataset);
-        else failed.push({ name, error: data.error || 'Failed' });
+        if (res.ok) {
+          succeeded.push(data.dataset);
+          // Auto-assign all jobs if a user was selected
+          if (assignToUserId && data.dataset?.id) {
+            try {
+              const jobsRes = await fetch(`/api/datasets/${data.dataset.id}/jobs`);
+              const jobsData = await jobsRes.json();
+              const jobIds = (jobsData.jobs || []).map((j) => j.id);
+              if (jobIds.length > 0) {
+                await fetch(`/api/datasets/${data.dataset.id}/jobs/bulk-assign`, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ jobIds, userId: Number(assignToUserId) }),
+                });
+              }
+            } catch { /* non-fatal */ }
+          }
+        } else {
+          failed.push({ name, error: data.error || 'Failed' });
+        }
       } catch {
         failed.push({ name, error: 'Network error' });
       }
@@ -468,6 +498,17 @@ function AddDatasetModal({ onClose, onCreated }) {
                 </select>
               </div>
             )}
+
+            {/* Assign To */}
+            <div style={styles.field}>
+              <label style={styles.label}>Assign To <small style={{ color: '#5a6a8a', fontWeight: 400 }}>(optional — assigns all jobs to this user)</small></label>
+              <select style={styles.select} value={assignToUserId} onChange={(e) => setAssignToUserId(e.target.value)}>
+                <option value="">— Do not assign —</option>
+                {users.map((u) => (
+                  <option key={u.id} value={u.id}>{u.username}{u.displayName ? ` (${u.displayName})` : ''}</option>
+                ))}
+              </select>
+            </div>
 
             <div style={styles.sectionDivider} />
 

@@ -109,13 +109,12 @@ export const GET = withApiLogging(async (req) => {
 
       const datasetPath = dataset.datasetPath || '';
       const isDuplicateView = view === 'duplicates';
-      const { basePath: datasetBasePath, folder: datasetFolder } = buildDatasetFolder(datasetPath);
-      const folder = isDuplicateView ? 'duplicate/images' : datasetFolder;
+      const folder = isDuplicateView ? 'duplicate/images' : 'images';
       const scanned = isDuplicateView ? scanFolderImagePaths(datasetPath, folder) : null;
 
       return NextResponse.json({
         datasetId: dataset.id,
-        basePath: isDuplicateView ? datasetPath : datasetBasePath,
+        basePath: datasetPath,
         folder,
         datasetPath,
         view,

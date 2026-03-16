@@ -9,7 +9,7 @@ export const dynamic = 'force-dynamic';
 export const GET = withApiLogging(async function handler(req) {
   const actor = await getUserFromRequest(req);
   if (!actor) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-  if (actor.role !== 'admin') return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+  if (actor.role !== 'admin' && actor.role !== 'data-manager') return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
 
   const types = await getAllDatasetTypes();
   return NextResponse.json({ types });
