@@ -77,7 +77,7 @@ export default function AppHeader({ title, backHref, backLabel }) {
             style={{ ...styles.navBtn, ...(pathname?.startsWith('/admin/tasks') ? styles.navBtnActive : {}) }}
             onClick={() => router.push('/admin/tasks')}
           >
-            Tasks
+            Background Tasks
             {runningTasks > 0 && (
               <span style={styles.taskBadge}>{runningTasks}</span>
             )}
