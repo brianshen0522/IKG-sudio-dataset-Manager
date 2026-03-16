@@ -41,7 +41,11 @@ export async function ensureBossStarted() {
     const { runDuplicateScan } = await import('./duplicate-scan-worker.js');
     await boss.work('duplicate-scan', runDuplicateScan);
 
-    console.log('[pg-boss] started — worker registered for duplicate-scan');
+    await boss.createQueue('move-dataset-to-check');
+    const { runMoveDataset } = await import('./move-dataset-worker.js');
+    await boss.work('move-dataset-to-check', runMoveDataset);
+
+    console.log('[pg-boss] started — workers registered for duplicate-scan and move-dataset-to-check');
     return boss;
   })().catch((err) => {
     globalThis[START_KEY] = null;

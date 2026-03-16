@@ -51,6 +51,10 @@ export const PATCH = withApiLogging(async function handler(req, { params }) {
   if (!dataset) return NextResponse.json({ error: 'Dataset not found' }, { status: 404 });
   if (!canUpdateDataset(actor, dataset)) return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
 
+  if (['pending', 'moving', 'verifying'].includes(dataset.moveStatus)) {
+    return NextResponse.json({ error: 'Cannot edit a dataset while a move is in progress' }, { status: 409 });
+  }
+
   let body;
   try {
     body = await req.json();
@@ -74,6 +78,11 @@ export const DELETE = withApiLogging(async function handler(req, { params }) {
   if (!dataset) return NextResponse.json({ error: 'Dataset not found' }, { status: 404 });
   if (!canDeleteDataset(actor, dataset)) return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
 
-  await deleteDataset(id);
+  try {
+    await deleteDataset(id);
+  } catch (err) {
+    if (err.status === 409) return NextResponse.json({ error: err.message }, { status: 409 });
+    throw err;
+  }
   return NextResponse.json({ ok: true });
 });

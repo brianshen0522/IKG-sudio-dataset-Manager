@@ -334,6 +334,20 @@ function EditDatasetModal({ dataset, onClose, onSaved }) {
   );
 }
 
+const MOVE_STATUS_COLOR = {
+  pending:   '#f1b11a',
+  moving:    '#2f7ff5',
+  verifying: '#a78bfa',
+  failed:    '#f87171',
+};
+
+const MOVE_STATUS_LABEL = {
+  pending:   'Move Pending',
+  moving:    'Moving…',
+  verifying: 'Verifying…',
+  failed:    'Move Failed',
+};
+
 export default function DatasetDetailPage() {
   const { id } = useParams();
   const router = useRouter();
@@ -350,6 +364,11 @@ export default function DatasetDetailPage() {
   const [deleteConfirm, setDeleteConfirm] = useState(false);
   const [selectedIds, setSelectedIds] = useState(new Set());
   const [bulkAssignModal, setBulkAssignModal] = useState(false);
+  const [markDoneConfirm, setMarkDoneConfirm] = useState(null); // jobId
+  const [moveConfirm, setMoveConfirm] = useState(false);
+  const [moveForceChecked, setMoveForceChecked] = useState(false);
+  const [moveLoading, setMoveLoading] = useState(false);
+  const [moveError, setMoveError] = useState('');
 
   const isAdmin = user?.role === 'admin';
   const isDM = user?.role === 'data-manager';
@@ -489,6 +508,35 @@ export default function DatasetDetailPage() {
     }
   }
 
+  async function handleMoveToCheck(force = false) {
+    setMoveLoading(true);
+    setMoveError('');
+    try {
+      const res = await fetch(`/api/datasets/${id}/move-to-check`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ force }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        if (res.status === 422 && data.totalJobs !== undefined) {
+          // Not all done — offer force option
+          setMoveConfirm('force');
+        } else {
+          setMoveError(data.error || 'Move failed');
+        }
+        return;
+      }
+      setMoveConfirm(false);
+      // Optimistically update dataset move status
+      setDataset((prev) => prev ? { ...prev, moveStatus: 'pending' } : prev);
+    } catch {
+      setMoveError('Network error');
+    } finally {
+      setMoveLoading(false);
+    }
+  }
+
   if (authLoading || loading) {
     return (
       <div style={styles.page}>
@@ -532,7 +580,21 @@ export default function DatasetDetailPage() {
                 {dataset.hasRunningTask && (
                   <span style={styles.scanningBadge}>⟳ Scanning duplicates…</span>
                 )}
-                <button style={styles.secondaryBtn} onClick={openDatasetViewer} disabled={dataset.hasRunningTask}>
+                {dataset.moveStatus && MOVE_STATUS_COLOR[dataset.moveStatus] && (
+                  <span style={{
+                    ...styles.scanningBadge,
+                    color: MOVE_STATUS_COLOR[dataset.moveStatus],
+                    background: MOVE_STATUS_COLOR[dataset.moveStatus] + '22',
+                    borderColor: MOVE_STATUS_COLOR[dataset.moveStatus] + '44',
+                  }}>
+                    {MOVE_STATUS_LABEL[dataset.moveStatus] || dataset.moveStatus}
+                  </span>
+                )}
+                <button
+                  style={styles.secondaryBtn}
+                  onClick={openDatasetViewer}
+                  disabled={dataset.hasRunningTask || ['pending','moving','verifying'].includes(dataset.moveStatus)}
+                >
                   Open Viewer
                 </button>
                 {dataset.hasDuplicateFolder && (
@@ -540,21 +602,54 @@ export default function DatasetDetailPage() {
                     View Duplicates
                   </button>
                 )}
-                <button style={styles.actionBtn} onClick={() => setEditModal(true)}>
+                <button
+                  style={styles.actionBtn}
+                  onClick={() => setEditModal(true)}
+                  disabled={['pending','moving','verifying'].includes(dataset.moveStatus)}
+                >
                   Edit Dataset
                 </button>
+                {dataset.typeId && !['pending','moving','verifying'].includes(dataset.moveStatus) && (
+                  <button
+                    style={{ ...styles.actionBtn, borderColor: '#20c25a44', color: '#20c25a' }}
+                    onClick={() => {
+                      setMoveError('');
+                      setMoveForceChecked(false);
+                      const allDone = (dataset.totalJobs ?? 0) > 0 && (dataset.labelledJobs ?? 0) === (dataset.totalJobs ?? 0);
+                      setMoveConfirm(allDone ? true : 'force');
+                    }}
+                  >
+                    Move to Check
+                  </button>
+                )}
               </>
             )}
             {isAdminOrDM && (
               <button
                 style={styles.dangerBtn}
                 onClick={() => setDeleteConfirm(true)}
+                disabled={['pending','moving','verifying'].includes(dataset?.moveStatus)}
               >
                 Delete Dataset
               </button>
             )}
           </div>
         </div>
+
+        {/* Move failed error banner */}
+        {isAdminOrDM && dataset?.moveStatus === 'failed' && dataset?.moveError && (
+          <div style={{ ...styles.errorMsg, marginBottom: '16px' }}>
+            <strong>Move to Check failed:</strong> {dataset.moveError}
+            {dataset.typeId && (
+              <button
+                style={{ marginLeft: '12px', background: 'transparent', border: '1px solid #f87171', borderRadius: '4px', color: '#f87171', cursor: 'pointer', fontSize: '11px', padding: '2px 8px' }}
+                onClick={() => { setMoveError(''); setMoveConfirm(true); }}
+              >
+                Retry
+              </button>
+            )}
+          </div>
+        )}
 
         {/* Progress Summary */}
         {isAdminOrDM && total > 0 && (
@@ -591,7 +686,7 @@ export default function DatasetDetailPage() {
           {isAdminOrDM && selectedIds.size > 0 && (
             <div style={styles.bulkBar}>
               <span style={styles.bulkCount}>{selectedIds.size} selected</span>
-              <button style={styles.bulkBtn} onClick={() => setBulkAssignModal(true)}>
+              <button style={styles.bulkBtn} disabled={['pending','moving','verifying'].includes(dataset?.moveStatus)} onClick={() => setBulkAssignModal(true)}>
                 Assign Selected
               </button>
               <button style={styles.bulkClearBtn} onClick={() => setSelectedIds(new Set())}>
@@ -628,6 +723,7 @@ export default function DatasetDetailPage() {
                 </div>
                 {jobs.map((job) => {
                   const busy = actionLoading === job.id;
+                  const isMoving = ['pending', 'moving', 'verifying'].includes(dataset?.moveStatus);
                   const isMyJob = String(job.assignedTo) === String(user?.id);
                   return (
                     <div key={job.id} style={{ ...styles.tableRow, ...gridStyle }}>
@@ -665,40 +761,49 @@ export default function DatasetDetailPage() {
                             onClick={() => openJobViewer(job.id)}>Viewer</button>
                         )}
                         {isAdminOrDM && job.status === 'unassigned' && (
-                          <button style={styles.actionBtn} disabled={busy}
+                          <button style={styles.actionBtn} disabled={busy || isMoving}
                             onClick={() => setAssignModal(job)}>Assign</button>
                         )}
                         {isAdminOrDM && job.status !== 'unassigned' && (
-                          <button style={styles.actionBtn} disabled={busy}
+                          <button style={styles.actionBtn} disabled={busy || isMoving}
                             onClick={() => setReassignModal(job)}>Reassign</button>
                         )}
                         {isAdminOrDM && job.status !== 'unassigned' && (
-                          <button style={{ ...styles.actionBtn, ...styles.actionBtnDanger }} disabled={busy}
+                          <button style={{ ...styles.actionBtn, ...styles.actionBtnDanger }} disabled={busy || isMoving}
                             onClick={() => jobAction(job.id, 'unassign')}>Unassign</button>
                         )}
                         {isAdminOrDM && (job.status === 'unlabelled' || job.status === 'labeling') && (
-                          <button style={{ ...styles.actionBtn, ...styles.actionBtnDanger }} disabled={busy}
+                          <button style={{ ...styles.actionBtn, ...styles.actionBtnDanger }} disabled={busy || isMoving}
                             onClick={() => jobAction(job.id, 'reset', { keepData: true })}>Reset</button>
                         )}
                         {isAdminOrDM && job.status === 'labelled' && (
-                          <button style={{ ...styles.actionBtn, ...styles.actionBtnDanger }} disabled={busy}
+                          <button style={{ ...styles.actionBtn, ...styles.actionBtnDanger }} disabled={busy || isMoving}
                             onClick={() => jobAction(job.id, 'reset', { keepData: false })}>Reopen</button>
                         )}
                         {/* User actions */}
                         {!isAdminOrDM && job.status === 'unassigned' && (
-                          <button style={styles.actionBtn} disabled={busy}
+                          <button style={styles.actionBtn} disabled={busy || isMoving}
                             onClick={() => jobAction(job.id, 'assign')}>Self-Assign</button>
                         )}
                         {!isAdminOrDM && isMyJob && job.status === 'unlabelled' && (
-                          <button style={styles.openBtn} disabled={busy}
+                          <button style={styles.openBtn} disabled={busy || isMoving}
                             onClick={() => openJobEditor(job.id)}>Start Labeling</button>
                         )}
                         {!isAdminOrDM && isMyJob && job.status === 'labeling' && (
-                          <button style={styles.openBtn} disabled={busy}
+                          <button style={styles.openBtn} disabled={busy || isMoving}
                             onClick={() => openJobEditor(job.id)}>Continue</button>
                         )}
+                        {!isAdminOrDM && isMyJob && (job.status === 'unlabelled' || job.status === 'labeling') && (
+                          <button
+                            style={{ ...styles.actionBtn, borderColor: '#20c25a44', color: '#20c25a' }}
+                            disabled={busy || isMoving}
+                            onClick={() => setMarkDoneConfirm(job.id)}
+                          >
+                            Mark Done
+                          </button>
+                        )}
                         {!isAdminOrDM && isMyJob && job.status !== 'labelled' && (
-                          <button style={{ ...styles.actionBtn, ...styles.actionBtnDanger }} disabled={busy}
+                          <button style={{ ...styles.actionBtn, ...styles.actionBtnDanger }} disabled={busy || isMoving}
                             onClick={() => jobAction(job.id, 'unassign')}>Unassign</button>
                         )}
                       </span>
@@ -752,6 +857,28 @@ export default function DatasetDetailPage() {
           }}
         />
       )}
+      {markDoneConfirm !== null && (
+        <div style={styles.modalOverlay} onClick={() => setMarkDoneConfirm(null)}>
+          <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
+            <div style={styles.modalHeader}>
+              <h3 style={styles.modalTitle}>Mark Job as Done?</h3>
+              <button style={styles.closeBtn} onClick={() => setMarkDoneConfirm(null)}>×</button>
+            </div>
+            <p style={{ color: '#9ba9c3', marginBottom: '20px', fontSize: '14px' }}>
+              This will mark the job as completed. You will no longer be able to edit it unless a manager reopens it.
+            </p>
+            <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end' }}>
+              <button style={styles.cancelBtn} onClick={() => setMarkDoneConfirm(null)}>Cancel</button>
+              <button
+                style={{ ...styles.submitBtn, background: '#20c25a' }}
+                onClick={() => { jobAction(markDoneConfirm, 'complete'); setMarkDoneConfirm(null); }}
+              >
+                Confirm
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {deleteConfirm && (
         <div style={styles.modalOverlay} onClick={() => setDeleteConfirm(false)}>
           <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
@@ -765,6 +892,56 @@ export default function DatasetDetailPage() {
             <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end' }}>
               <button style={styles.cancelBtn} onClick={() => setDeleteConfirm(false)}>Cancel</button>
               <button style={{ ...styles.submitBtn, background: '#d24343' }} onClick={handleDelete}>Delete</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {moveConfirm && (
+        <div style={styles.modalOverlay} onClick={() => { setMoveConfirm(false); setMoveError(''); setMoveForceChecked(false); }}>
+          <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
+            <div style={styles.modalHeader}>
+              <h3 style={styles.modalTitle}>Move to Check?</h3>
+              <button style={styles.closeBtn} onClick={() => { setMoveConfirm(false); setMoveError(''); setMoveForceChecked(false); }}>×</button>
+            </div>
+            <p style={{ color: '#9ba9c3', marginBottom: '16px', fontSize: '14px' }}>
+              This will rsync the dataset to the check path, verify the transfer, delete the source directory, and remove the dataset from the database. This action cannot be undone.
+            </p>
+            {moveConfirm === 'force' && (
+              <div style={styles.forceWarningBox}>
+                <p style={{ color: '#f1b11a', fontSize: '13px', margin: '0 0 12px' }}>
+                  <strong>Warning:</strong> {dataset?.labelledJobs ?? 0} of {dataset?.totalJobs ?? 0} jobs are marked as done. Some jobs may be incomplete.
+                </p>
+                <label style={styles.forceCheckRow}>
+                  <input
+                    type="checkbox"
+                    checked={moveForceChecked}
+                    onChange={(e) => setMoveForceChecked(e.target.checked)}
+                    style={{ accentColor: '#f1b11a', width: '16px', height: '16px', flexShrink: 0 }}
+                  />
+                  <span style={{ color: '#e6edf7', fontSize: '13px' }}>
+                    I understand that not all jobs are done and want to proceed anyway
+                  </span>
+                </label>
+              </div>
+            )}
+            {moveError && (
+              <p style={{ color: '#f87171', fontSize: '13px', marginBottom: '14px' }}>{moveError}</p>
+            )}
+            {dataset?.moveError && moveConfirm === true && (
+              <p style={{ color: '#f87171', fontSize: '12px', fontFamily: 'monospace', marginBottom: '14px', wordBreak: 'break-all' }}>
+                Last error: {dataset.moveError}
+              </p>
+            )}
+            <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end', marginTop: '20px' }}>
+              <button style={styles.cancelBtn} onClick={() => { setMoveConfirm(false); setMoveError(''); setMoveForceChecked(false); }}>Cancel</button>
+              <button
+                style={{ ...styles.submitBtn, background: '#20c25a', ...(moveConfirm === 'force' && !moveForceChecked ? { opacity: 0.4, cursor: 'not-allowed' } : {}) }}
+                onClick={() => handleMoveToCheck(moveConfirm === 'force')}
+                disabled={moveLoading || (moveConfirm === 'force' && !moveForceChecked)}
+              >
+                {moveLoading ? 'Queuing…' : 'Move to Check'}
+              </button>
             </div>
           </div>
         </div>
@@ -947,4 +1124,6 @@ const styles = {
   checkboxLabel: { display: 'flex', alignItems: 'center', gap: '8px', color: '#9ba9c3', fontSize: '13px', cursor: 'pointer' },
   submitBtn: { background: '#e45d25', border: 'none', borderRadius: '8px', color: '#fff', cursor: 'pointer', fontSize: '13px', fontWeight: 700, padding: '11px', marginTop: '4px' },
   cancelBtn: { background: 'transparent', border: '1px solid #25344d', borderRadius: '8px', color: '#9ba9c3', cursor: 'pointer', fontSize: '13px', padding: '11px 20px' },
+  forceWarningBox: { background: 'rgba(241,177,26,0.08)', border: '1px solid rgba(241,177,26,0.2)', borderRadius: '8px', padding: '14px 16px', marginBottom: '4px' },
+  forceCheckRow: { display: 'flex', alignItems: 'flex-start', gap: '10px', cursor: 'pointer' },
 };

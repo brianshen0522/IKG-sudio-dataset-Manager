@@ -30,7 +30,7 @@ export const POST = withApiLogging(async function handler(req) {
     return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 });
   }
 
-  const { datasetPath, displayName, threshold, debug, pentagonFormat, obbMode, classFile, duplicateMode, duplicateLabels } = body || {};
+  const { datasetPath, displayName, threshold, debug, pentagonFormat, obbMode, classFile, duplicateMode, duplicateLabels, typeId } = body || {};
   if (!datasetPath) {
     return NextResponse.json({ error: 'datasetPath is required' }, { status: 400 });
   }
@@ -51,7 +51,8 @@ export const POST = withApiLogging(async function handler(req) {
       obbMode: obbMode || 'rectangle',
       classFile: classFile || null,
       duplicateMode: duplicateMode || 'move',
-      duplicateLabels: duplicateLabels ?? 0
+      duplicateLabels: duplicateLabels ?? 0,
+      typeId: typeId || null
     });
 
     // Enqueue duplicate scan via pg-boss

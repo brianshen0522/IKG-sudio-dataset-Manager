@@ -77,7 +77,7 @@ const TASK_QUERY = `
   FROM pgboss.job j
   LEFT JOIN datasets d ON d.id = (j.data->>'datasetId')::integer
   LEFT JOIN users u ON u.id = (j.data->>'createdBy')::integer
-  WHERE j.name = 'duplicate-scan'
+  WHERE j.name IN ('duplicate-scan', 'move-dataset-to-check')
 `;
 
 const GROUP_BY = `
@@ -178,7 +178,7 @@ export async function datasetHasRunningTask(datasetId) {
   try {
     const result = await client.query(
       `SELECT 1 FROM pgboss.job
-       WHERE name = 'duplicate-scan'
+       WHERE name IN ('duplicate-scan', 'move-dataset-to-check')
          AND (data->>'datasetId')::integer = $1
          AND state IN ('created', 'retry', 'active')
        LIMIT 1`,

@@ -28,13 +28,20 @@ export const PUT = withApiLogging(async function handler(req) {
     return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 });
   }
 
-  const { job_size } = body || {};
+  const { job_size, move_retry_limit } = body || {};
   if (job_size !== undefined) {
     const size = parseInt(job_size, 10);
     if (isNaN(size) || size < 1) {
       return NextResponse.json({ error: 'job_size must be a positive integer' }, { status: 400 });
     }
     await setSetting('job_size', size, Number(actor.sub));
+  }
+  if (move_retry_limit !== undefined) {
+    const limit = parseInt(move_retry_limit, 10);
+    if (isNaN(limit) || limit < 0) {
+      return NextResponse.json({ error: 'move_retry_limit must be a non-negative integer' }, { status: 400 });
+    }
+    await setSetting('move_retry_limit', limit, Number(actor.sub));
   }
 
   const settings = await getAllSettings();

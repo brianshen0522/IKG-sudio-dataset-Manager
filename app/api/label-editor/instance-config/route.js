@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import path from 'path';
 import { CONFIG } from '@/lib/manager';
 import { getInstanceByName } from '@/lib/db';
-import { getJobById, getDatasetById, getJobUserState } from '@/lib/db-datasets';
+import { getJobById, getDatasetById, getJobUserState, startJob } from '@/lib/db-datasets';
 import { getUserFromRequest } from '@/lib/auth';
 import { canAccessJob, canViewAll, canEditJob } from '@/lib/permissions';
 import fs from 'fs';
@@ -41,6 +41,11 @@ export const GET = withApiLogging(async (req) => {
 
       const dataset = await getDatasetById(job.datasetId);
       if (!dataset) return NextResponse.json({ error: 'Dataset not found' }, { status: 404 });
+
+      // Auto-transition unlabelled → labeling when the assigned user opens the editor
+      if (job.status === 'unlabelled' && job.assignedTo === Number(actor.sub)) {
+        try { await startJob(job.id, Number(actor.sub)); } catch { /* ignore race conditions */ }
+      }
 
       const userState = await getJobUserState(Number(jobId), Number(actor.sub));
 

@@ -30,7 +30,13 @@ function rowToDataset(row) {
     assignedJobs: row.assigned_jobs !== undefined ? Number(row.assigned_jobs) : undefined,
     labelingJobs: row.labeling_jobs !== undefined ? Number(row.labeling_jobs) : undefined,
     labelledJobs: row.labelled_jobs !== undefined ? Number(row.labelled_jobs) : undefined,
-    unassignedJobs: row.unassigned_jobs !== undefined ? Number(row.unassigned_jobs) : undefined
+    unassignedJobs: row.unassigned_jobs !== undefined ? Number(row.unassigned_jobs) : undefined,
+    typeId: row.type_id ?? null,
+    typeName: row.type_name || null,
+    moveStatus: row.move_status || null,
+    moveTaskId: row.move_task_id || null,
+    moveError: row.move_error || null,
+    moveAttempt: row.move_attempt ?? 0,
   };
 }
 
@@ -107,7 +113,8 @@ export async function createDataset({
   obbMode = 'rectangle',
   classFile = null,
   duplicateMode = 'move',
-  duplicateLabels = 0
+  duplicateLabels = 0,
+  typeId = null
 }) {
   await ensureInitialized();
 
@@ -118,8 +125,8 @@ export async function createDataset({
     const dsResult = await client.query(
       `INSERT INTO datasets (
         dataset_path, display_name, created_by, total_images, job_size,
-        threshold, debug, pentagon_format, obb_mode, class_file, duplicate_mode, duplicate_labels
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+        threshold, debug, pentagon_format, obb_mode, class_file, duplicate_mode, duplicate_labels, type_id
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
       RETURNING *`,
       [
         normalizedPath,
@@ -133,7 +140,8 @@ export async function createDataset({
         obbMode,
         classFile,
         duplicateMode,
-        duplicateLabels
+        duplicateLabels,
+        typeId || null
       ]
     );
     const dataset = rowToDataset(dsResult.rows[0]);
@@ -223,25 +231,27 @@ export async function getAllDatasets({ role, userId } = {}) {
     const baseQuery = `
       SELECT
         d.*,
+        dt.name AS type_name,
         COUNT(j.id)                                            AS total_jobs,
         COUNT(j.id) FILTER (WHERE j.status = 'unassigned')    AS unassigned_jobs,
         COUNT(j.id) FILTER (WHERE j.status = 'unlabelled')    AS assigned_jobs,
         COUNT(j.id) FILTER (WHERE j.status = 'labeling')      AS labeling_jobs,
         COUNT(j.id) FILTER (WHERE j.status = 'labelled')      AS labelled_jobs
       FROM datasets d
+      LEFT JOIN dataset_types dt ON dt.id = d.type_id
       LEFT JOIN jobs j ON j.dataset_id = d.id
     `;
 
     let result;
     if (role === 'admin' || role === 'data-manager') {
       result = await client.query(
-        baseQuery + ' GROUP BY d.id ORDER BY d.created_at ASC'
+        baseQuery + ' GROUP BY d.id, dt.name ORDER BY d.created_at ASC'
       );
     } else {
       result = await client.query(
         baseQuery +
         ' WHERE d.id IN (SELECT DISTINCT dataset_id FROM jobs WHERE assigned_to = $1)' +
-        ' GROUP BY d.id ORDER BY d.created_at ASC',
+        ' GROUP BY d.id, dt.name ORDER BY d.created_at ASC',
         [userId]
       );
     }
@@ -264,15 +274,17 @@ export async function getDatasetById(id) {
     const result = await client.query(
       `SELECT
         d.*,
+        dt.name AS type_name,
         COUNT(j.id)                                            AS total_jobs,
         COUNT(j.id) FILTER (WHERE j.status = 'unassigned')    AS unassigned_jobs,
         COUNT(j.id) FILTER (WHERE j.status = 'unlabelled')    AS assigned_jobs,
         COUNT(j.id) FILTER (WHERE j.status = 'labeling')      AS labeling_jobs,
         COUNT(j.id) FILTER (WHERE j.status = 'labelled')      AS labelled_jobs
        FROM datasets d
+       LEFT JOIN dataset_types dt ON dt.id = d.type_id
        LEFT JOIN jobs j ON j.dataset_id = d.id
        WHERE d.id = $1
-       GROUP BY d.id`,
+       GROUP BY d.id, dt.name`,
       [id]
     );
     const dataset = rowToDataset(result.rows[0]);
@@ -302,6 +314,11 @@ export async function deleteDataset(id) {
   await ensureInitialized();
   const client = await getPool().connect();
   try {
+    const check = await client.query('SELECT move_status FROM datasets WHERE id = $1', [id]);
+    if (!check.rows[0]) return false;
+    if (['pending', 'moving', 'verifying'].includes(check.rows[0].move_status)) {
+      throw Object.assign(new Error('Cannot delete a dataset while a move is in progress'), { status: 409 });
+    }
     const result = await client.query('DELETE FROM datasets WHERE id = $1 RETURNING id', [id]);
     return result.rowCount > 0;
   } finally {
@@ -340,6 +357,27 @@ export async function updateDatasetFields(id, fields) {
       values
     );
     return rowToDataset(result.rows[0]);
+  } finally {
+    client.release();
+  }
+}
+
+export async function updateDatasetMoveStatus(id, { moveStatus, moveTaskId, moveError, moveAttempt } = {}) {
+  await ensureInitialized();
+  const client = await getPool().connect();
+  try {
+    const setClauses = [];
+    const values = [];
+    let p = 1;
+    if (moveStatus !== undefined)  { setClauses.push(`move_status = $${p++}`);  values.push(moveStatus); }
+    if (moveTaskId !== undefined)  { setClauses.push(`move_task_id = $${p++}`); values.push(moveTaskId); }
+    if (moveError !== undefined)   { setClauses.push(`move_error = $${p++}`);   values.push(moveError); }
+    if (moveAttempt !== undefined) { setClauses.push(`move_attempt = $${p++}`); values.push(moveAttempt); }
+    if (setClauses.length === 0) return;
+    setClauses.push(`updated_at = $${p++}`);
+    values.push(new Date().toISOString());
+    values.push(id);
+    await client.query(`UPDATE datasets SET ${setClauses.join(', ')} WHERE id = $${p}`, values);
   } finally {
     client.release();
   }
@@ -507,7 +545,7 @@ export async function completeJob(jobId, userId) {
     if (job.assigned_to !== userId) {
       throw Object.assign(new Error('Job is not assigned to you'), { status: 403 });
     }
-    if (job.status !== 'labeling') {
+    if (!['labeling', 'unlabelled'].includes(job.status)) {
       throw Object.assign(new Error(`Cannot complete a job with status: ${job.status}`), { status: 409 });
     }
 

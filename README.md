@@ -1,168 +1,206 @@
 # IKG Studio Dataset Manager
 
-Web application for managing datasets, job assignment, FiftyOne launchers, duplicate handling, and the built-in YOLO label editor.
+Web application for managing YOLO datasets, multi-user job assignment, duplicate handling, and the built-in label editor.
 
 ## What It Does
 
-- Manages datasets stored under a configured base path
-- Splits datasets into assignable jobs and tracks progress per user
-- Launches per-dataset FiftyOne instances on a managed port range
-- Provides a browser-based YOLO label editor and quick-edit tools
-- Supports duplicate detection rules and duplicate action defaults
-- Uses PostgreSQL for users, datasets, jobs, settings, and legacy instance data
-- Protects the UI and API with JWT-based login
+- **Dataset Types** — admin configures types (e.g. `dice`, `roulette`) with an *uncheck path* (work-in-progress) and a *check path* (completed). Datasets can be moved from uncheck → check via rsync with hash verification.
+- **Dataset & Job management** — datasets are split into fixed-size jobs and assigned to labelers. Progress is tracked per user per job.
+- **Move to Check** — admin/data-manager initiates a background rsync move, verifies a metadata hash, removes the source, and removes the dataset from the system automatically.
+- **Label editor** — browser-based YOLO bounding-box / OBB editor with multi-image quick-edit tools.
+- **Duplicate detection** — configurable IoU-based duplicate scan runs as a background task when a dataset is added.
+- **Role-based access** — three roles: `admin`, `data-manager`, `user`. All routes are JWT-protected.
+- **PostgreSQL** — stores users, datasets, jobs, settings, background task logs, and assignment history.
 
 ## Requirements
 
-- Node.js 20+
-- PostgreSQL 16+ if running locally
-- Python 3 with FiftyOne dependencies if you want to launch local FiftyOne jobs outside Docker
-- Docker + Docker Compose if you want the containerized setup
+- Docker + Docker Compose (recommended)
+- Node.js 20+ and PostgreSQL 16+ if running locally
 
-## Quick Start
+## Quick Start (Docker)
 
-### 1. Configure environment
+### 1. Copy and configure the compose file
+
+```bash
+cp compose.example.yml compose.yml
+```
+
+Edit `compose.yml` and add a volume mount for **every path** you intend to use as an `uncheck_path` or `check_path` in dataset type settings. Each path must be mounted at the **same absolute path** as on the host:
+
+```yaml
+volumes:
+  - /data/work:/data/work:rw          # your uncheck_path
+  - /mnt/smb/check:/mnt/smb/check:rw  # your check_path (SMB share, etc.)
+  - pm2-logs:/root/.pm2/logs
+  - ./deletion_logs:/app/deletion_logs:rw
+```
+
+If paths are on SMB or NFS, mount them on the host first — Docker bind-mounts whatever the host sees at startup.
+
+### 2. Configure environment
 
 ```bash
 cp .env.example .env
 ```
 
-Set at least:
+Set at minimum:
 
-- `JWT_SECRET`
-- `DATABASE_URL`
-- `DATASET_BASE_PATH`
-- `PUBLIC_ADDRESS`
+| Variable | Notes |
+| --- | --- |
+| `JWT_SECRET` | Required. Generate with `openssl rand -base64 32` |
+| `PUBLIC_ADDRESS` | Hostname/IP users use to reach the app (default: `localhost`) |
+| `INITIAL_ADMIN_PASSWORD` | Seed password for the `admin` account (default: `admin`) |
 
-The app seeds an initial admin user on first startup:
-
-- Username: `admin`
-- Password: `INITIAL_ADMIN_PASSWORD`
-
-### 2. Start with Docker Compose
+### 3. Start
 
 ```bash
 docker compose up -d
 ```
 
-Open the manager at `http://localhost:3000` unless you changed `MANAGER_PORT`.
+Open `http://localhost:3000` (or the `PUBLIC_ADDRESS`:`MANAGER_PORT` you configured).
 
-Notes:
+The app seeds an initial admin account on first startup — username `admin`, password from `INITIAL_ADMIN_PASSWORD`.
 
-- Docker Compose starts PostgreSQL automatically.
-- The app container mounts `${DATASET_BASE_PATH}` to the same path inside the container, so the path in `.env` must exist on the host.
-- `JWT_SECRET` is required by [`compose.yml`](/home/brian/projects/IKG-studio-dataset-Manager/compose.yml).
+---
 
-### 3. Start locally
-
-Install dependencies:
+## Quick Start (Local)
 
 ```bash
 npm install
 ```
 
-Start PostgreSQL, point `DATABASE_URL` at it, then run:
+Point `DATABASE_URL` at a running PostgreSQL instance, then:
 
 ```bash
-npm run dev
+npm run dev       # development
+npm run build && npm start  # production
 ```
 
-For production:
-
-```bash
-npm run build
-npm start
-```
-
-If local FiftyOne launching needs a non-default Python, set `PYTHON_BIN` or `FIFTYONE_PYTHON`.
+---
 
 ## Environment Variables
 
-These are the active environment variables used by the app:
-
 | Variable | Required | Default | Notes |
 | --- | --- | --- | --- |
-| `JWT_SECRET` | Yes | none | Required for login/session signing |
-| `DATABASE_URL` | Yes | none | PostgreSQL connection string |
-| `INITIAL_ADMIN_PASSWORD` | No | `admin` | Seed password for the initial `admin` user |
-| `DATASET_BASE_PATH` | Yes | `/data/datasets` | Root directory scanned for datasets |
-| `PUBLIC_ADDRESS` | No | `localhost` | Hostname/IP users use to open the manager and launched tools |
-| `PORT_START` | No | `5151` | First managed FiftyOne port |
-| `PORT_END` | No | `5160` | Last managed FiftyOne port |
-| `MANAGER_PORT` | No | `3000` | Next.js web server port |
-| `DEFAULT_IOU_THRESHOLD` | No | `0.8` | Default duplicate threshold for new datasets |
+| `JWT_SECRET` | **Yes** | — | Session signing secret |
+| `DATABASE_URL` | **Yes (local only)** | — | PostgreSQL connection string. Docker Compose hardcodes this internally. |
+| `INITIAL_ADMIN_PASSWORD` | No | `admin` | Seed password for the `admin` user |
+| `PUBLIC_ADDRESS` | No | `localhost` | Hostname/IP for the app |
+| `MANAGER_PORT` | No | `3000` | Web server port |
+| `DEFAULT_IOU_THRESHOLD` | No | `0.8` | Default duplicate IoU threshold for new datasets |
 | `DEFAULT_DEBUG_MODE` | No | `false` | Default duplicate debug mode |
-| `LABEL_EDITOR_PRELOAD_COUNT` | No | `20` in code | Number of nearby images preloaded by the label editor |
-| `VIEWER_IMAGE_LOADING_BATCH_COUNT` | No | `200` | Max concurrent viewer thumbnail loads |
-| `THUMBNAIL_QUALITY` | No | `70` in code | JPEG quality used for thumbnails |
+| `LABEL_EDITOR_PRELOAD_COUNT` | No | `25` | Images preloaded by the label editor |
+| `VIEWER_IMAGE_LOADING_BATCH_COUNT` | No | `200` | Max concurrent thumbnail loads in the viewer |
+| `THUMBNAIL_QUALITY` | No | `50` | JPEG quality for thumbnails (1–100) |
 | `API_LOG_LEVEL` | No | `info` | `info`, `debug`, or `silent` |
-| `PYTHON_BIN` | No | auto-detected | Preferred Python executable for FiftyOne tasks |
-| `FIFTYONE_PYTHON` | No | auto-detected | Legacy alias for `PYTHON_BIN` |
-| `AVAILABLE_OBB_MODES` | No | `rectangle,4point` | Allowed admin-selectable OBB modes |
-| `DUPLICATE_RULES` | No | empty | JSON array string of path-based duplicate rules |
-| `DUPLICATE_DEFAULT_ACTION` | No | `move` | Fallback duplicate action |
+| `AVAILABLE_OBB_MODES` | No | `rectangle,4point` | OBB creation modes shown in settings |
+| `DUPLICATE_RULES` | No | — | JSON array of path-based duplicate rules (see below) |
+| `DUPLICATE_DEFAULT_ACTION` | No | `move` | Fallback duplicate action: `move`, `delete`, or `skip` |
 
-Reference template: [`.env.example`](/home/brian/projects/IKG-studio-dataset-Manager/.env.example)
+Reference template: [`.env.example`](.env.example)
 
-## Docker Compose Notes
+---
 
-[`compose.yml`](/home/brian/projects/IKG-studio-dataset-Manager/compose.yml) runs:
+## Dataset Types & Move to Check
 
-- `postgres` on port `5432`
-- `fiftyone-manager` on `MANAGER_PORT`
-- The full managed FiftyOne port range from `PORT_START` to `PORT_END`
+### Configure types (admin → Settings)
 
-Persisted data:
+Each type has:
+- **Name** — label shown in the UI (e.g. `dice`)
+- **Uncheck Path** — root directory where work-in-progress datasets live
+- **Check Path** — destination root for completed datasets
 
-- `./postgres-data` for PostgreSQL
-- `pm2-logs` volume for PM2 logs
-- `./deletion_logs` for deletion audit output
+### Add a dataset
 
-## Authentication
+On the dashboard, click **+ Add Dataset**. If types are configured, pick a type and select a subdirectory from the available list (subdirs that have `images/` + `labels/` and are not already registered). The path is filled automatically.
 
-All pages and API routes except login/logout are protected by [`middleware.js`](/home/brian/projects/IKG-studio-dataset-Manager/middleware.js). If there is no valid JWT cookie, the app redirects to `/login` or returns `401` for API requests.
+A valid dataset directory must contain:
 
-On first startup, [`src/lib/db.js`](/home/brian/projects/IKG-studio-dataset-Manager/src/lib/db.js) creates the initial admin account if the `users` table is empty.
-
-## Dataset Layout
-
-Datasets are discovered under `DATASET_BASE_PATH`. A directory is treated as a dataset when it contains both `images/` and `labels/`.
-
-Example:
-
-```text
-/data/datasets/project-a/
+```
+my-dataset/
   images/
   labels/
 ```
 
-The recursive dataset scan currently searches up to 5 levels deep.
+### Move to Check
+
+On the dataset detail page, admin/data-manager can click **Move to Check**. The system will:
+
+1. Enqueue a background job via pg-boss
+2. rsync the dataset directory to `check_path/subdir`
+3. Verify a metadata hash (filename + size + mtime) between source and destination
+4. Delete the source directory
+5. Remove the dataset record from the database
+
+While a move is in progress the dataset is locked — edits and deletes are blocked. If the move fails, the error is shown on the detail page with a **Retry** option. The retry limit is configurable in Settings (`move_retry_limit`, default `3`).
+
+---
+
+## Roles
+
+| Role | Capabilities |
+| --- | --- |
+| `admin` | Everything: dataset types, system settings, users, move to check |
+| `data-manager` | Create/manage datasets, assign/reassign jobs, move to check |
+| `user` | View assigned jobs, open label editor, mark jobs as done |
+
+---
 
 ## Duplicate Handling
 
-The app supports two layers of duplicate configuration:
+Duplicate detection runs automatically as a background task when a dataset is added. Two layers of configuration:
 
-- `DEFAULT_IOU_THRESHOLD` and `DEFAULT_DEBUG_MODE` for defaults on new datasets
-- `DUPLICATE_RULES` plus `DUPLICATE_DEFAULT_ACTION` for path-based duplicate behavior
+**Per-dataset (set at creation time):**
+- IoU threshold, debug mode, action (`move` / `delete` / `skip`), label count filter
 
-`DUPLICATE_RULES` must be a JSON array string. Example:
+**Global rules (`DUPLICATE_RULES` env var):**
 
 ```env
 DUPLICATE_RULES=[{"pattern":"invalid","action":"skip","labels":0,"priority":1},{"pattern":"dice","action":"delete","labels":3,"priority":2}]
 ```
 
-Rule priority is ascending: lower numbers win.
+Rule fields: `pattern` (substring match on dataset path), `action`, `labels` (0 = all), `priority` (lower wins). `DUPLICATE_DEFAULT_ACTION` applies when no rule matches.
 
-## Migration Scripts
+---
 
-- [`scripts/migrate-to-postgres.js`](/home/brian/projects/IKG-studio-dataset-Manager/scripts/migrate-to-postgres.js): migrate older instance data into PostgreSQL
-- [`scripts/migrate-to-datasets.js`](/home/brian/projects/IKG-studio-dataset-Manager/scripts/migrate-to-datasets.js): migrate legacy instance-oriented records to dataset/job structures
+## Docker Compose Notes
 
-Run them with the same `DATABASE_URL` used by the app.
+`compose.yml` (copied from `compose.example.yml`) runs:
+
+- `postgres` on port `5432`
+- `ikg-studio-dataset-manager` on `MANAGER_PORT`
+
+Persisted data:
+- `./postgres-data` — PostgreSQL data
+- `pm2-logs` volume — background task logs
+- `./deletion_logs` — deletion audit output
+
+`compose.yml` is git-ignored. Commit `compose.example.yml` and edit `compose.yml` locally on each machine.
+
+---
+
+## Authentication
+
+All pages and API routes except `/login` and `/logout` are protected by `middleware.js`. No valid JWT cookie → redirect to `/login` (pages) or `401` (API).
+
+The initial admin account is seeded on first startup if the `users` table is empty.
+
+---
 
 ## Troubleshooting
 
-- If the app fails at startup, check `JWT_SECRET` and `DATABASE_URL` first.
-- If dataset browsing is empty, verify `DATASET_BASE_PATH` exists and is mounted at the same path inside Docker.
-- If launched tools open with the wrong host, fix `PUBLIC_ADDRESS`.
-- If FiftyOne jobs do not start locally, set `PYTHON_BIN` to the correct interpreter.
+| Symptom | Fix |
+| --- | --- |
+| App fails to start | Check `JWT_SECRET` and `DATABASE_URL` |
+| File browser shows empty / wrong root | Verify the path is mounted in the container at the same absolute path |
+| Move to Check fails with "rsync not found" | Rebuild the Docker image (`docker compose build`) — `rsync` is installed in the Dockerfile |
+| Move fails hash mismatch | Usually a partial rsync; retry will re-rsync and re-verify |
+| Public address wrong in shared links | Set `PUBLIC_ADDRESS` in `.env` |
+
+---
+
+## Migration Scripts
+
+- `scripts/migrate-to-datasets.js` — migrate legacy instance-oriented records to dataset/job structure
+
+Run with the same `DATABASE_URL` used by the app.

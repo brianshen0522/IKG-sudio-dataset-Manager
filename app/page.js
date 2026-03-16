@@ -15,6 +15,21 @@ const STATUS_COLOR = {
   labelled: '#20c25a',
 };
 
+const MOVE_STATUS_COLOR = {
+  pending:   '#9ba9c3',
+  moving:    '#2f7ff5',
+  verifying: '#f1b11a',
+  done:      '#20c25a',
+  failed:    '#d24343',
+};
+const MOVE_STATUS_LABEL = {
+  pending:   'Move Pending',
+  moving:    'Moving…',
+  verifying: 'Verifying…',
+  done:      'Moved',
+  failed:    'Move Failed',
+};
+
 const STATUS_LABEL = {
   unassigned: 'Unassigned',
   unlabelled: 'Unlabelled',
@@ -58,7 +73,7 @@ function ProgressBar({ jobs }) {
 }
 
 function AddDatasetModal({ onClose, onCreated }) {
-  const [path, setPath] = useState('');
+  const [datasetPath, setDatasetPath] = useState('');
   const [displayName, setDisplayName] = useState('');
   const [classFile, setClassFile] = useState('');
   const [classFilePreview, setClassFilePreview] = useState('');
@@ -71,12 +86,66 @@ function AddDatasetModal({ onClose, onCreated }) {
   const [showPathBrowser, setShowPathBrowser] = useState(false);
   const [showClassFileBrowser, setShowClassFileBrowser] = useState(false);
 
+  // Dataset type selection
+  const [datasetTypes, setDatasetTypes] = useState([]);
+  const [typesLoading, setTypesLoading] = useState(true);
+  const [selectedTypeId, setSelectedTypeId] = useState('');       // '' = manual / no type
+  const [availableSubdirs, setAvailableSubdirs] = useState([]);
+  const [subdirsLoading, setSubdirsLoading] = useState(false);
+  const [selectedSubdir, setSelectedSubdir] = useState('');
+
   // Duplicate detection config
   const [dupRule, setDupRule] = useState(null);         // auto-resolved from server
   const [dupAction, setDupAction] = useState('');       // '' = use auto
   const [dupLabels, setDupLabels] = useState('');       // '' = use auto
   const [dupThreshold, setDupThreshold] = useState('');  // '' = use auto
   const [dupDebug, setDupDebug] = useState(null);       // null = use auto
+
+  // Load dataset types on mount
+  useEffect(() => {
+    let cancelled = false;
+    fetch('/api/settings/dataset-types')
+      .then((r) => r.ok ? r.json() : { types: [] })
+      .then((data) => { if (!cancelled) { setDatasetTypes(data.types || []); setTypesLoading(false); } })
+      .catch(() => { if (!cancelled) setTypesLoading(false); });
+    return () => { cancelled = true; };
+  }, []);
+
+  // Load available subdirs when type is selected
+  useEffect(() => {
+    if (!selectedTypeId) {
+      setAvailableSubdirs([]);
+      setSelectedSubdir('');
+      return;
+    }
+    let cancelled = false;
+    setSubdirsLoading(true);
+    setSelectedSubdir('');
+    fetch(`/api/settings/dataset-types/${selectedTypeId}/available-datasets`)
+      .then((r) => r.ok ? r.json() : { available: [] })
+      .then((data) => {
+        if (!cancelled) {
+          setAvailableSubdirs(data.available || []);
+          setSubdirsLoading(false);
+        }
+      })
+      .catch(() => { if (!cancelled) setSubdirsLoading(false); });
+    return () => { cancelled = true; };
+  }, [selectedTypeId]);
+
+  // When subdir is selected, auto-fill path, display name, and class file
+  useEffect(() => {
+    if (!selectedSubdir) return;
+    const found = availableSubdirs.find((s) => s.name === selectedSubdir);
+    if (!found) return;
+    setDatasetPath(found.path);
+    setDisplayName(found.name);
+    // Auto-detect class file (same as DatasetBrowser)
+    fetch(`/api/auto-find-classes?path=${encodeURIComponent(found.path)}`)
+      .then((r) => r.ok ? r.json() : {})
+      .then((data) => { setClassFile(data.classFile || ''); })
+      .catch(() => {});
+  }, [selectedSubdir, availableSubdirs]);
 
   useEffect(() => {
     let cancelled = false;
@@ -126,7 +195,7 @@ function AddDatasetModal({ onClose, onCreated }) {
 
   // Fetch matching duplicate rule whenever path changes
   useEffect(() => {
-    const trimmed = path.trim();
+    const trimmed = datasetPath.trim();
     if (!trimmed) { setDupRule(null); return; }
     let cancelled = false;
     fetch(`/api/duplicate-rule?path=${encodeURIComponent(trimmed)}`)
@@ -134,7 +203,7 @@ function AddDatasetModal({ onClose, onCreated }) {
       .then((data) => { if (!cancelled && data) setDupRule(data); })
       .catch(() => {});
     return () => { cancelled = true; };
-  }, [path]);
+  }, [datasetPath]);
 
   function resetDupOverrides() {
     setDupAction('');
@@ -148,6 +217,8 @@ function AddDatasetModal({ onClose, onCreated }) {
   const effectiveThreshold = dupThreshold !== '' ? Number(dupThreshold) : (dupRule?.iouThreshold ?? 0.8);
   const effectiveDebug     = dupDebug     !== null ? dupDebug            : (dupRule?.debug      ?? false);
 
+  const isTypeMode = !!selectedTypeId;
+
   async function handleSubmit(e) {
     e.preventDefault();
     setError('');
@@ -157,7 +228,7 @@ function AddDatasetModal({ onClose, onCreated }) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          datasetPath: path.trim(),
+          datasetPath: datasetPath.trim(),
           displayName: displayName.trim() || undefined,
           classFile: classFile.trim() || null,
           pentagonFormat: obbFormat,
@@ -166,6 +237,7 @@ function AddDatasetModal({ onClose, onCreated }) {
           duplicateLabels: effectiveLabels,
           threshold: effectiveThreshold,
           debug: effectiveDebug,
+          typeId: selectedTypeId ? Number(selectedTypeId) : null,
         }),
       });
       const data = await res.json();
@@ -188,6 +260,58 @@ function AddDatasetModal({ onClose, onCreated }) {
         </div>
         <form onSubmit={handleSubmit} style={styles.form}>
 
+          {/* Dataset Type selector — only shown when types exist */}
+          {!typesLoading && datasetTypes.length > 0 && (
+            <div style={styles.field}>
+              <label style={styles.label}>Dataset Type</label>
+              <select
+                style={styles.select}
+                value={selectedTypeId}
+                onChange={(e) => {
+                  setSelectedTypeId(e.target.value);
+                  if (!e.target.value) {
+                    setDatasetPath('');
+                    setDisplayName('');
+                  }
+                }}
+              >
+                <option value="">None / Manual path</option>
+                {datasetTypes.map((t) => (
+                  <option key={t.id} value={t.id}>{t.name}</option>
+                ))}
+              </select>
+            </div>
+          )}
+
+          {/* Subdir picker when type is selected */}
+          {isTypeMode && (
+            <div style={styles.field}>
+              <label style={styles.label}>Dataset Subdirectory *</label>
+              {subdirsLoading ? (
+                <p style={{ color: '#9ba9c3', fontSize: '12px' }}>Loading available datasets…</p>
+              ) : availableSubdirs.length === 0 ? (
+                <p style={{ color: '#f1b11a', fontSize: '12px' }}>No available datasets found in uncheck path.</p>
+              ) : (
+                <select
+                  style={styles.select}
+                  value={selectedSubdir}
+                  onChange={(e) => setSelectedSubdir(e.target.value)}
+                  required
+                >
+                  <option value="">Select a dataset…</option>
+                  {availableSubdirs.map((s) => (
+                    <option key={s.name} value={s.name}>
+                      {s.name}{s.imageCount != null ? ` — ${s.imageCount} images` : ''}
+                    </option>
+                  ))}
+                </select>
+              )}
+              {selectedSubdir && (
+                <small style={styles.hint}>Path: {datasetPath}</small>
+              )}
+            </div>
+          )}
+
           <div style={styles.field}>
             <label style={styles.label}>Display Name</label>
             <input
@@ -195,24 +319,27 @@ function AddDatasetModal({ onClose, onCreated }) {
               value={displayName}
               onChange={(e) => setDisplayName(e.target.value)}
               placeholder="Dataset name"
-              autoFocus
+              autoFocus={!isTypeMode}
             />
           </div>
 
-          <div style={styles.field}>
-            <label style={styles.label}>Dataset Path *</label>
-            <div style={styles.inputRow}>
-              <input
-                style={{ ...styles.input, flex: 1 }}
-                value={path}
-                onChange={(e) => setPath(e.target.value)}
-                placeholder="/data/my-dataset"
-                required
-              />
-              <button type="button" style={styles.browseBtn} onClick={() => setShowPathBrowser(true)}>Browse</button>
+          {/* Manual path input — only shown when no type selected */}
+          {!isTypeMode && (
+            <div style={styles.field}>
+              <label style={styles.label}>Dataset Path *</label>
+              <div style={styles.inputRow}>
+                <input
+                  style={{ ...styles.input, flex: 1 }}
+                  value={datasetPath}
+                  onChange={(e) => setDatasetPath(e.target.value)}
+                  placeholder="/data/my-dataset"
+                  required
+                />
+                <button type="button" style={styles.browseBtn} onClick={() => setShowPathBrowser(true)}>Browse</button>
+              </div>
+              <small style={styles.hint}>Absolute path to the directory containing an images/ folder</small>
             </div>
-            <small style={styles.hint}>Absolute path to the directory containing an images/ folder</small>
-          </div>
+          )}
 
           <div style={styles.field}>
             <label style={styles.label}>Class Names File</label>
@@ -343,7 +470,7 @@ function AddDatasetModal({ onClose, onCreated }) {
           </div>
 
           {error && <p style={styles.errorMsg}>{error}</p>}
-          <button type="submit" style={styles.submitBtn} disabled={loading}>
+          <button type="submit" style={styles.submitBtn} disabled={loading || (isTypeMode && !selectedSubdir)}>
             {loading ? 'Creating…' : 'Create Dataset'}
           </button>
         </form>
@@ -352,9 +479,9 @@ function AddDatasetModal({ onClose, onCreated }) {
 
       {showPathBrowser && (
         <DatasetBrowser
-          value={path}
+          value={datasetPath}
           onChange={(p) => {
-            setPath(p);
+            setDatasetPath(p);
             const folderName = p.split('/').filter(Boolean).pop() || '';
             setDisplayName(folderName);
           }}
@@ -372,6 +499,26 @@ function AddDatasetModal({ onClose, onCreated }) {
         />
       )}
     </>
+  );
+}
+
+function MarkDoneConfirmModal({ onConfirm, onClose }) {
+  return (
+    <div style={styles.modalOverlay} onClick={onClose}>
+      <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
+        <div style={styles.modalHeader}>
+          <h2 style={styles.modalTitle}>Mark Job as Done?</h2>
+          <button style={styles.closeBtn} onClick={onClose}>×</button>
+        </div>
+        <p style={{ color: '#9ba9c3', fontSize: '14px', marginBottom: '20px' }}>
+          This will mark the job as completed. You will no longer be able to edit it unless a manager reopens it.
+        </p>
+        <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end' }}>
+          <button style={styles.cancelBtn} onClick={onClose}>Cancel</button>
+          <button style={styles.confirmDoneBtn} onClick={onConfirm}>Confirm</button>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -513,29 +660,36 @@ export default function DashboardPage() {
                   {datasets.map((d) => {
                     const dsJobs = jobs[d.id];
                     const scanning = !!d.hasRunningTask;
+                    const moveColor = MOVE_STATUS_COLOR[d.moveStatus];
                     return (
                       <div
                         key={d.id}
                         style={{ ...styles.card, ...(scanning ? styles.cardScanning : {}) }}
-                        onClick={() => !scanning && router.push(`/datasets/${d.id}`)}
+                        onClick={() => router.push(`/datasets/${d.id}`)}
                         role="button"
-                        tabIndex={scanning ? -1 : 0}
-                        onKeyDown={(e) => !scanning && e.key === 'Enter' && router.push(`/datasets/${d.id}`)}
+                        tabIndex={0}
+                        onKeyDown={(e) => e.key === 'Enter' && router.push(`/datasets/${d.id}`)}
                       >
                         <div style={styles.cardHeader}>
                           <span style={styles.cardName}>{d.displayName || d.datasetPath.split('/').pop()}</span>
-                          {scanning
-                            ? <span style={styles.scanningBadge}>⟳ Scanning…</span>
-                            : <span style={styles.cardImages}>{d.totalImages} images</span>
-                          }
+                          <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+                            {moveColor && (
+                              <span style={{ fontSize: '11px', fontWeight: 700, padding: '2px 8px', borderRadius: '20px', background: moveColor + '22', color: moveColor, border: `1px solid ${moveColor}44` }}>
+                                {MOVE_STATUS_LABEL[d.moveStatus] || d.moveStatus}
+                              </span>
+                            )}
+                            {scanning
+                              ? <span style={styles.scanningBadge}>⟳ Scanning…</span>
+                              : <span style={styles.cardImages}>{d.totalImages} images</span>
+                            }
+                          </div>
                         </div>
                         <p style={styles.cardPath}>{d.datasetPath}</p>
                         <div style={styles.cardActions}>
                           <button
                             type="button"
-                            style={{ ...styles.secondaryBtn, ...(scanning ? styles.btnDisabled : {}) }}
-                            disabled={scanning}
-                            onClick={(e) => { e.stopPropagation(); if (!scanning) openDatasetViewer(d.id); }}
+                            style={styles.secondaryBtn}
+                            onClick={(e) => { e.stopPropagation(); openDatasetViewer(d.id); }}
                           >
                             Open Viewer
                           </button>
@@ -577,10 +731,23 @@ export default function DashboardPage() {
 function MyJobsTab() {
   const [jobs, setJobs] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [markDoneConfirm, setMarkDoneConfirm] = useState(null); // jobId
 
   function openInNewTab(path) {
     if (typeof window === 'undefined') return;
     window.open(path, '_blank', 'noopener,noreferrer');
+  }
+
+  async function handleMarkDone(jobId) {
+    try {
+      const job = jobs.find((j) => j.id === jobId);
+      const res = await fetch(`/api/datasets/${job?.datasetId}/jobs/${jobId}/complete`, { method: 'POST' });
+      if (res.ok) {
+        const data = await res.json();
+        setJobs((prev) => prev.map((j) => j.id === jobId ? { ...j, status: data.job?.status ?? 'labelled' } : j));
+      }
+    } catch { /* ignore */ }
+    setMarkDoneConfirm(null);
   }
 
   useEffect(() => {
@@ -616,50 +783,74 @@ function MyJobsTab() {
   }
 
   return (
-    <div>
-      <div style={styles.topBar}>
-        <div>
-          <h1 style={styles.h1}>My Jobs</h1>
-          <p style={styles.subtitle}>{jobs.length} assigned job{jobs.length !== 1 ? 's' : ''}</p>
+    <>
+      <div>
+        <div style={styles.topBar}>
+          <div>
+            <h1 style={styles.h1}>My Jobs</h1>
+            <p style={styles.subtitle}>{jobs.length} assigned job{jobs.length !== 1 ? 's' : ''}</p>
+          </div>
+        </div>
+        <div style={styles.jobList}>
+          {jobs.map((j) => (
+            <div key={j.id} style={styles.jobCard}>
+              <div style={styles.jobCardLeft}>
+                <span style={styles.jobCardDataset}>{j.datasetName || j.datasetPath?.split('/').pop() || `Dataset ${j.datasetId}`}</span>
+                <span style={styles.jobCardTitle}>Job #{j.jobIndex}</span>
+                <span style={styles.jobCardRange}>Images {j.imageStart}–{j.imageEnd}</span>
+              </div>
+              <div style={styles.jobCardRight}>
+                <span style={{ ...styles.statusBadge, background: STATUS_COLOR[j.status] + '22', color: STATUS_COLOR[j.status] }}>
+                  {STATUS_LABEL[j.status]}
+                </span>
+                {(j.status === 'unlabelled' || j.status === 'labeling') && (
+                  <>
+                    <button style={styles.secondaryBtn} onClick={() => openInNewTab(`/viewer?jobId=${j.id}`)}>
+                      Open Viewer
+                    </button>
+                    <button style={styles.openBtn} onClick={() => openInNewTab(`/label-editor?jobId=${j.id}`)}>
+                      Open Editor
+                    </button>
+                    <button style={styles.doneBtn} onClick={() => setMarkDoneConfirm(j.id)}>
+                      Mark Done
+                    </button>
+                  </>
+                )}
+              </div>
+            </div>
+          ))}
         </div>
       </div>
-      <div style={styles.jobList}>
-        {jobs.map((j) => (
-          <div key={j.id} style={styles.jobCard}>
-            <div style={styles.jobCardLeft}>
-              <span style={styles.jobCardDataset}>{j.datasetName || j.datasetPath?.split('/').pop() || `Dataset ${j.datasetId}`}</span>
-              <span style={styles.jobCardTitle}>Job #{j.jobIndex}</span>
-              <span style={styles.jobCardRange}>Images {j.imageStart}–{j.imageEnd}</span>
-            </div>
-            <div style={styles.jobCardRight}>
-              <span style={{ ...styles.statusBadge, background: STATUS_COLOR[j.status] + '22', color: STATUS_COLOR[j.status] }}>
-                {STATUS_LABEL[j.status]}
-              </span>
-              {(j.status === 'unlabelled' || j.status === 'labeling') && (
-                <>
-                  <button style={styles.secondaryBtn} onClick={() => openInNewTab(`/viewer?jobId=${j.id}`)}>
-                    Open Viewer
-                  </button>
-                  <button style={styles.openBtn} onClick={() => openInNewTab(`/label-editor?jobId=${j.id}`)}>
-                    Open Editor
-                  </button>
-                </>
-              )}
-            </div>
-          </div>
-        ))}
-      </div>
-    </div>
+      {markDoneConfirm !== null && (
+        <MarkDoneConfirmModal
+          onConfirm={() => handleMarkDone(markDoneConfirm)}
+          onClose={() => setMarkDoneConfirm(null)}
+        />
+      )}
+    </>
   );
 }
 
 function UserDashboard({ user }) {
   const [jobs, setJobs] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [markDoneConfirm, setMarkDoneConfirm] = useState(null); // jobId
 
   function openInNewTab(path) {
     if (typeof window === 'undefined') return;
     window.open(path, '_blank', 'noopener,noreferrer');
+  }
+
+  async function handleMarkDone(jobId) {
+    try {
+      const job = jobs.find((j) => j.id === jobId);
+      const res = await fetch(`/api/datasets/${job?.datasetId}/jobs/${jobId}/complete`, { method: 'POST' });
+      if (res.ok) {
+        const data = await res.json();
+        setJobs((prev) => prev.map((j) => j.id === jobId ? { ...j, status: data.job?.status ?? 'labelled' } : j));
+      }
+    } catch { /* ignore */ }
+    setMarkDoneConfirm(null);
   }
 
   useEffect(() => {
@@ -738,17 +929,14 @@ function UserDashboard({ user }) {
                   </span>
                   {(j.status === 'unlabelled' || j.status === 'labeling') && (
                     <>
-                      <button
-                        style={styles.secondaryBtn}
-                        onClick={() => openInNewTab(`/viewer?jobId=${j.id}`)}
-                      >
+                      <button style={styles.secondaryBtn} onClick={() => openInNewTab(`/viewer?jobId=${j.id}`)}>
                         Open Viewer
                       </button>
-                      <button
-                        style={styles.openBtn}
-                        onClick={() => openInNewTab(`/label-editor?jobId=${j.id}`)}
-                      >
+                      <button style={styles.openBtn} onClick={() => openInNewTab(`/label-editor?jobId=${j.id}`)}>
                         Open Editor
+                      </button>
+                      <button style={styles.doneBtn} onClick={() => setMarkDoneConfirm(j.id)}>
+                        Mark Done
                       </button>
                     </>
                   )}
@@ -758,6 +946,12 @@ function UserDashboard({ user }) {
           </div>
         )}
       </main>
+      {markDoneConfirm !== null && (
+        <MarkDoneConfirmModal
+          onConfirm={() => handleMarkDone(markDoneConfirm)}
+          onClose={() => setMarkDoneConfirm(null)}
+        />
+      )}
     </div>
   );
 }
@@ -1192,6 +1386,35 @@ const styles = {
     fontSize: '14px',
     fontWeight: 600,
     color: '#e6edf7',
+  },
+  cancelBtn: {
+    background: 'transparent',
+    border: '1px solid #25344d',
+    borderRadius: '8px',
+    color: '#9ba9c3',
+    cursor: 'pointer',
+    fontSize: '13px',
+    padding: '9px 20px',
+  },
+  confirmDoneBtn: {
+    background: '#20c25a',
+    border: 'none',
+    borderRadius: '8px',
+    color: '#fff',
+    cursor: 'pointer',
+    fontSize: '13px',
+    fontWeight: 700,
+    padding: '9px 20px',
+  },
+  doneBtn: {
+    background: 'transparent',
+    border: '1px solid #20c25a44',
+    borderRadius: '6px',
+    color: '#20c25a',
+    cursor: 'pointer',
+    fontSize: '12px',
+    fontWeight: 700,
+    padding: '6px 14px',
   },
   submitBtn: {
     background: '#e45d25',

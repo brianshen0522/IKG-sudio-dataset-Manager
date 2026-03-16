@@ -161,6 +161,34 @@ export async function initDatabase() {
       );
     `);
 
+    // ---- Dataset Types ----
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS dataset_types (
+        id           SERIAL PRIMARY KEY,
+        name         VARCHAR(255) NOT NULL,
+        uncheck_path TEXT NOT NULL,
+        check_path   TEXT NOT NULL,
+        created_at   TIMESTAMP DEFAULT NOW(),
+        updated_at   TIMESTAMP DEFAULT NOW()
+      );
+    `);
+
+    // ---- Migrate: add move/type columns to datasets ----
+    await client.query(`
+      ALTER TABLE datasets ADD COLUMN IF NOT EXISTS type_id      INTEGER REFERENCES dataset_types(id) ON DELETE SET NULL;
+      ALTER TABLE datasets ADD COLUMN IF NOT EXISTS move_status  VARCHAR(20) DEFAULT NULL;
+      ALTER TABLE datasets ADD COLUMN IF NOT EXISTS move_task_id TEXT DEFAULT NULL;
+      ALTER TABLE datasets ADD COLUMN IF NOT EXISTS move_error   TEXT DEFAULT NULL;
+      ALTER TABLE datasets ADD COLUMN IF NOT EXISTS move_attempt INTEGER NOT NULL DEFAULT 0;
+    `);
+
+    // ---- Seed move_retry_limit ----
+    await client.query(`
+      INSERT INTO system_settings (key, value)
+      VALUES ('move_retry_limit', '3')
+      ON CONFLICT (key) DO NOTHING;
+    `);
+
     // ---- Seed initial system admin ----
     const userCount = await client.query('SELECT COUNT(*) FROM users');
     if (parseInt(userCount.rows[0].count, 10) === 0) {
@@ -459,6 +487,93 @@ export async function setSetting(key, value, updatedBy = null) {
        ON CONFLICT (key) DO UPDATE SET value = $2, updated_by = $3, updated_at = NOW()`,
       [key, String(value), updatedBy]
     );
+  } finally {
+    client.release();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Dataset type helpers
+// ---------------------------------------------------------------------------
+
+function rowToDatasetType(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    name: row.name,
+    uncheckPath: row.uncheck_path,
+    checkPath: row.check_path,
+    createdAt: row.created_at ? row.created_at.toISOString() : null,
+    updatedAt: row.updated_at ? row.updated_at.toISOString() : null,
+  };
+}
+
+export async function getAllDatasetTypes() {
+  await ensureInitialized();
+  const client = await getPool().connect();
+  try {
+    const result = await client.query('SELECT * FROM dataset_types ORDER BY name ASC');
+    return result.rows.map(rowToDatasetType);
+  } finally {
+    client.release();
+  }
+}
+
+export async function getDatasetTypeById(id) {
+  await ensureInitialized();
+  const client = await getPool().connect();
+  try {
+    const result = await client.query('SELECT * FROM dataset_types WHERE id = $1', [id]);
+    return rowToDatasetType(result.rows[0]);
+  } finally {
+    client.release();
+  }
+}
+
+export async function createDatasetType({ name, uncheckPath, checkPath }) {
+  await ensureInitialized();
+  const client = await getPool().connect();
+  try {
+    const result = await client.query(
+      `INSERT INTO dataset_types (name, uncheck_path, check_path) VALUES ($1, $2, $3) RETURNING *`,
+      [name, uncheckPath, checkPath]
+    );
+    return rowToDatasetType(result.rows[0]);
+  } finally {
+    client.release();
+  }
+}
+
+export async function updateDatasetType(id, { name, uncheckPath, checkPath }) {
+  await ensureInitialized();
+  const client = await getPool().connect();
+  try {
+    const setClauses = [];
+    const values = [];
+    let p = 1;
+    if (name !== undefined)        { setClauses.push(`name = $${p++}`);         values.push(name); }
+    if (uncheckPath !== undefined)  { setClauses.push(`uncheck_path = $${p++}`); values.push(uncheckPath); }
+    if (checkPath !== undefined)    { setClauses.push(`check_path = $${p++}`);   values.push(checkPath); }
+    if (setClauses.length === 0) return getDatasetTypeById(id);
+    setClauses.push(`updated_at = $${p++}`);
+    values.push(new Date().toISOString());
+    values.push(id);
+    const result = await client.query(
+      `UPDATE dataset_types SET ${setClauses.join(', ')} WHERE id = $${p} RETURNING *`,
+      values
+    );
+    return rowToDatasetType(result.rows[0]);
+  } finally {
+    client.release();
+  }
+}
+
+export async function deleteDatasetType(id) {
+  await ensureInitialized();
+  const client = await getPool().connect();
+  try {
+    const result = await client.query('DELETE FROM dataset_types WHERE id = $1 RETURNING id', [id]);
+    return result.rowCount > 0;
   } finally {
     client.release();
   }

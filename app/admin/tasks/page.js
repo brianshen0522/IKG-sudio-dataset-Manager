@@ -21,7 +21,7 @@ const STATUS_LABEL = {
   cancelled: 'Cancelled',
 };
 const LOG_COLOR = { info: '#9ba9c3', warn: '#f1b11a', error: '#f87171' };
-const TYPE_LABEL = { 'duplicate-scan': 'Duplicate Scan' };
+const TYPE_LABEL = { 'duplicate-scan': 'Duplicate Scan', 'move-dataset-to-check': 'Move to Check' };
 
 function duration(task) {
   const start = task.startedAt ? new Date(task.startedAt) : null;

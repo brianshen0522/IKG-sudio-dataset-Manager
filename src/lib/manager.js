@@ -26,7 +26,7 @@ function parseDuplicateRules() {
 }
 
 export const CONFIG = {
-  datasetBasePath: process.env.DATASET_BASE_PATH || '/data/datasets',
+  datasetBasePath: process.env.DATASET_BASE_PATH || '/',
   portRange: {
     start: parseInt(process.env.PORT_START || '5151', 10),
     end: parseInt(process.env.PORT_END || '5160', 10)

@@ -17,6 +17,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgl1 \
     libglib2.0-0 \
     libgomp1 \
+    rsync \
     && rm -rf /var/lib/apt/lists/*
 
 # Install libssl1.1 from Ubuntu archive for legacy binary compatibility

@@ -1,0 +1,66 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: IKG-studio-dataset-manager-postgres
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+        reservations:
+          memory: 128M
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./postgres-data:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_DB=datasets_manager
+      - POSTGRES_USER=studio
+      - POSTGRES_PASSWORD=studio
+    restart: unless-stopped
+
+  ikg-studio-dataset-manager:
+    build: .
+    container_name: IKG-studio-dataset-manager
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 128M
+    depends_on:
+      - postgres
+    ports:
+      - "${MANAGER_PORT:-3000}:${MANAGER_PORT:-3000}"
+    volumes:
+      # Mount every path you use as uncheck_path or check_path in dataset type settings.
+      # Each path must be mounted at the SAME absolute path as on the host
+      # so the paths stored in the database match what the container sees.
+      #
+      # Local disk examples:
+      #   - /data/work:/data/work:rw
+      #   - /mnt/disk2/check:/mnt/disk2/check:rw
+      #
+      # SMB / NFS share (mount on host first, then reference here):
+      #   - /mnt/smb/datasets:/mnt/smb/datasets:rw
+      #
+      - /data/work:/data/work:rw          # example uncheck_path
+      - /data/check:/data/check:rw        # example check_path
+      - pm2-logs:/root/.pm2/logs
+      - ./deletion_logs:/app/deletion_logs:rw
+    environment:
+      - MANAGER_PORT=${MANAGER_PORT:-3000}
+      - PUBLIC_ADDRESS=${PUBLIC_ADDRESS:-localhost}
+      - DEFAULT_IOU_THRESHOLD=${DEFAULT_IOU_THRESHOLD:-0.8}
+      - DEFAULT_DEBUG_MODE=${DEFAULT_DEBUG_MODE:-false}
+      - LABEL_EDITOR_PRELOAD_COUNT=${LABEL_EDITOR_PRELOAD_COUNT:-25}
+      - DATABASE_URL=postgresql://studio:studio@postgres:5432/datasets_manager
+      - AVAILABLE_OBB_MODES=${AVAILABLE_OBB_MODES:-rectangle,4point}
+      - DUPLICATE_RULES=${DUPLICATE_RULES:-}
+      - DUPLICATE_DEFAULT_ACTION=${DUPLICATE_DEFAULT_ACTION:-move}
+      - THUMBNAIL_QUALITY=${THUMBNAIL_QUALITY:-50}
+      - JWT_SECRET=${JWT_SECRET:?JWT_SECRET is required}
+      - INITIAL_ADMIN_PASSWORD=${INITIAL_ADMIN_PASSWORD:-admin}
+    restart: unless-stopped
+
+volumes:
+  pm2-logs:
