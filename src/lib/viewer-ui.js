@@ -26,6 +26,7 @@ let currentDatasetId = '';
 let currentJobId = '';
 let currentView = '';
 let currentClassFile = '';
+let allowDelete = true; // set from server; false when user is not assigned to the job
 let obbMode = 'rectangle';
 let classNames = [];
 let allImageList = [];
@@ -141,12 +142,14 @@ async function resolveJob(jobId) {
   obbMode = cfg.obbMode || 'rectangle';
   allImageList = cfg.images || [];
   imageMetaByPath = cfg.imageMeta || {};
+  allowDelete = cfg.canDelete !== false;
 
   if (Number.isFinite(cfg.viewerImageLoadingBatchCount)) {
     viewerImageLoadingBatchCount = Math.max(1, parseInt(cfg.viewerImageLoadingBatchCount, 10) || 200);
   }
 
   await loadViewerClasses();
+  buildShell();
 }
 
 async function resolveDataset(datasetId) {
@@ -162,12 +165,14 @@ async function resolveDataset(datasetId) {
   folder = cfg.folder || 'images';
   currentClassFile = cfg.classFile || '';
   obbMode = cfg.obbMode || 'rectangle';
+  allowDelete = cfg.canDelete !== false;
 
   if (Number.isFinite(cfg.viewerImageLoadingBatchCount)) {
     viewerImageLoadingBatchCount = Math.max(1, parseInt(cfg.viewerImageLoadingBatchCount, 10) || 200);
   }
 
   await loadViewerClasses();
+  buildShell();
 }
 
 export function refreshViewerLocale() {
@@ -252,7 +257,7 @@ async function loadData() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(currentJobId
-          ? { jobId: Number(currentJobId), imageNames }
+          ? { jobId: Number(currentJobId), imageNames, view: currentView || undefined }
           : { basePath, imagePaths: batch, view: currentView || undefined }
         )
       });
@@ -306,7 +311,8 @@ function buildShell() {
   const label = currentJobId
     ? `Job #${currentJobId}${currentView === 'duplicates' ? ' Duplicates' : ''} Viewer`
     : instanceName || folder.split('/').filter(Boolean).pop() || 'Viewer';
-  const canOpenEditor = currentView !== 'duplicates';
+  const canDelete = allowDelete && currentView !== 'duplicates';
+  const canOpenEditor = canDelete; // only assigned user can open editor; duplicates view also disallowed
 
   root.innerHTML = `
 <style>
@@ -807,16 +813,16 @@ function buildShell() {
 
   .v-lb-img-wrap {
     position: relative;
-    max-width: calc(100vw - 130px);
-    max-height: calc(100vh - 62px);
+    width: calc(100vw - 130px);
+    height: calc(100vh - 62px);
     display: flex;
     align-items: center;
     justify-content: center;
   }
 
   .v-lb-img {
-    max-width: 100%;
-    max-height: calc(100vh - 62px);
+    width: 100%;
+    height: 100%;
     object-fit: contain;
     display: block;
   }
@@ -913,7 +919,7 @@ function buildShell() {
       <button class="vbtn vbtn-sec" onclick="vSelAll()">${t('editor.selectMode.selectAll')}</button>
       <button class="vbtn vbtn-sec" onclick="vDeselAll()">${t('editor.selectMode.deselectAll')}</button>
       ${canOpenEditor ? `<button class="vbtn vbtn-pri" id="vEditSelBtn" onclick="vOpenEditorSel()" disabled>${t('editor.selectMode.openEditorSelected', { count: '0' })}</button>` : ''}
-      <button class="vbtn vbtn-dan" id="vDelBtn" onclick="vDelete()" disabled>${t('editor.selectMode.deleteSelected', { count: '0' })}</button>
+      ${canDelete ? `<button class="vbtn vbtn-dan" id="vDelBtn" onclick="vDelete()" disabled>${t('editor.selectMode.deleteSelected', { count: '0' })}</button>` : ''}
       <div class="v-size-slider" title="Thumbnail size">
         <span>⊞</span>
         <input type="range" id="vSizeSlider" min="80" max="400" step="8" value="176" oninput="vSetSize(this.value)">
@@ -963,12 +969,12 @@ function buildShell() {
   window.vClear = clearFilters;
   window.vSelAll = selectAll;
   window.vDeselAll = deselectAll;
-  window.vDelete = deleteSelected;
-  window.vOpenEditorSel = openEditorSelected;
-  window.vOpenEditor = openEditor;
+  if (canDelete) window.vDelete = deleteSelected;
+  if (canOpenEditor) window.vOpenEditorSel = openEditorSelected;
+  if (canOpenEditor) window.vOpenEditor = openEditor;
   window.vFindDuplicates = triggerFindDuplicates;
   window.vToggleSel = toggleSel;
-  window.vOpen = currentView === 'duplicates' ? openLightbox : openImage;
+  window.vOpen = canOpenEditor ? openImage : openLightbox;
   window.vToggleCls = toggleClass;
   window.vRefreshLabel = refreshCardLabel;
   window.vNavApply = applyNavSearch;
@@ -985,7 +991,7 @@ function buildShell() {
   }
   window.vLbClose = closeLightbox;
   window.vLbNav = lightboxNav;
-  window.vLbEdit = () => openImage(imageList[lightboxIndex]);
+  if (canOpenEditor) window.vLbEdit = () => openImage(imageList[lightboxIndex]);
   window.vLbBboxDraw = drawLightboxBboxes;
 }
 
@@ -1201,39 +1207,50 @@ function renderGrid() {
   preloadThumbnailsInBackground(renderToken);
 }
 
+// Thumbnail loading: batch multiple images per request, limit concurrent requests.
+// This keeps HTTP connections free for other API calls (nav, auth, etc.).
+const THUMB_BATCH_SIZE = 20; // images per request
+const THUMB_CONCURRENCY = 4; // simultaneous requests
+
 async function preloadThumbnailsInBackground(renderToken) {
   const total = imageList.length;
   if (!total) return;
 
-  // Load all thumbnails after opening viewer, with bounded concurrency
-  const CONCURRENCY = Math.min(viewerImageLoadingBatchCount, total);
-  let cursor = 0;
+  // Skip already-cached images
+  const items = [];
+  for (let idx = 0; idx < total; idx++) {
+    const p = imageList[idx];
+    if (!thumbCache[p]) items.push({ p, idx });
+  }
+  if (!items.length) return;
 
+  // Split into batches of THUMB_BATCH_SIZE
+  const batches = [];
+  for (let i = 0; i < items.length; i += THUMB_BATCH_SIZE) {
+    batches.push(items.slice(i, i + THUMB_BATCH_SIZE));
+  }
+
+  let cursor = 0;
   async function worker() {
     while (renderToken === gridRenderToken) {
-      const idx = cursor;
-      cursor += 1;
-      if (idx >= total) return;
-      const imgPath = imageList[idx];
-      await loadThumb(imgPath, idx, renderToken);
+      const bi = cursor++;
+      if (bi >= batches.length) return;
+      await loadThumbsBatch(batches[bi], renderToken);
     }
   }
 
-  await Promise.all(Array.from({ length: CONCURRENCY }, () => worker()));
+  await Promise.all(Array.from({ length: Math.min(THUMB_CONCURRENCY, batches.length) }, () => worker()));
 }
 
-async function loadThumb(imgPath, idx, renderToken) {
+async function loadThumbsBatch(items, renderToken) {
   if (renderToken !== gridRenderToken) return;
-  const wrap = document.getElementById(`viw${idx}`);
-  if (!wrap) {
-    markThumbnailProgressDone(imgPath, renderToken);
-    return;
-  }
 
-  // Already rendered from cache in renderGrid — just mark done
-  if (thumbCache[imgPath] && wrap.querySelector('.v-img')) {
-    markThumbnailProgressDone(imgPath, renderToken);
-    return;
+  // Build name→item map for matching responses back to items
+  const byBasename = new Map(); // basename → item (fallback for jobId mode)
+  const byPath = new Map();     // relative path → item (basePath mode)
+  for (const item of items) {
+    byBasename.set(item.p.split('/').pop(), item);
+    byPath.set(item.p, item);
   }
 
   try {
@@ -1241,33 +1258,81 @@ async function loadThumb(imgPath, idx, renderToken) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(currentJobId
-        ? { jobId: Number(currentJobId), imageNames: [imgPath.split('/').pop()], maxSize: 176, view: currentView || undefined }
-        : { basePath, imagePaths: [imgPath], maxSize: 176, view: currentView || undefined }
+        ? { jobId: Number(currentJobId), imageNames: items.map(({ p }) => p.split('/').pop()), maxSize: 176, view: currentView || undefined }
+        : { basePath, imagePaths: items.map(({ p }) => p), maxSize: 176, view: currentView || undefined }
       )
     });
 
     if (renderToken !== gridRenderToken) return;
-    if (!res.ok) { wrap.innerHTML = ''; return; }
+
+    if (!res.ok) {
+      for (const { p, idx } of items) {
+        const wrap = document.getElementById(`viw${idx}`);
+        if (wrap) wrap.innerHTML = '';
+        markThumbnailProgressDone(p, renderToken);
+      }
+      return;
+    }
 
     const ct = res.headers.get('content-type') || '';
     const boundary = (ct.split('boundary=')[1] || '').trim();
-    if (!boundary) { wrap.innerHTML = ''; return; }
+    if (!boundary) {
+      for (const { p, idx } of items) {
+        const wrap = document.getElementById(`viw${idx}`);
+        if (wrap) wrap.innerHTML = '';
+        markThumbnailProgressDone(p, renderToken);
+      }
+      return;
+    }
 
     const buf = await res.arrayBuffer();
     if (renderToken !== gridRenderToken) return;
-    const imgBlob = extractFirstPart(buf, boundary);
-    if (!imgBlob) { wrap.innerHTML = ''; return; }
 
-    const url = URL.createObjectURL(imgBlob);
-    thumbCache[imgPath] = url;
-    wrap.innerHTML = `<img class="v-img" src="${url}" alt="" onload="vBboxDraw(this,'${escHtml(imgPath).replace(/'/g, "\\'")}',${idx})">
-<svg class="v-svg" id="vs${idx}" viewBox="0 0 1 1"></svg>`;
-    window.vBboxDraw = drawBboxes;
+    const parts = extractAllParts(buf, boundary);
+    const matched = new Set();
+
+    for (const { name, blob } of parts) {
+      let decodedName = name;
+      try { decodedName = decodeURIComponent(name); } catch {}
+
+      // Try exact path match first, then basename fallback
+      const item = byPath.get(decodedName) || byBasename.get(decodedName.split('/').pop());
+      if (!item || matched.has(item.p)) continue;
+      matched.add(item.p);
+
+      const { p, idx } = item;
+      const url = URL.createObjectURL(blob);
+      thumbCache[p] = url;
+      const wrap = document.getElementById(`viw${idx}`);
+      if (wrap) {
+        const esc = escHtml(p).replace(/'/g, "\\'");
+        wrap.innerHTML = `<img class="v-img" src="${url}" alt="" onload="vBboxDraw(this,'${esc}',${idx})"><svg class="v-svg" id="vs${idx}" viewBox="0 0 1 1"></svg>`;
+        window.vBboxDraw = drawBboxes;
+      }
+      markThumbnailProgressDone(p, renderToken);
+    }
+
+    // Mark any items the server didn't return (missing/unreadable images)
+    for (const { p, idx } of items) {
+      if (!matched.has(p)) {
+        const wrap = document.getElementById(`viw${idx}`);
+        if (wrap && !thumbCache[p]) wrap.innerHTML = '';
+        markThumbnailProgressDone(p, renderToken);
+      }
+    }
   } catch {
-    if (wrap) wrap.innerHTML = '';
-  } finally {
-    markThumbnailProgressDone(imgPath, renderToken);
+    if (renderToken !== gridRenderToken) return;
+    for (const { p, idx } of items) {
+      const wrap = document.getElementById(`viw${idx}`);
+      if (wrap) wrap.innerHTML = '';
+      markThumbnailProgressDone(p, renderToken);
+    }
   }
+}
+
+// Single-image thumbnail load (used for per-card refresh)
+async function loadThumb(imgPath, idx, renderToken) {
+  await loadThumbsBatch([{ p: imgPath, idx }], renderToken);
 }
 
 function markThumbnailProgressDone(imgPath, renderToken) {
@@ -1283,6 +1348,58 @@ function markThumbnailProgressDone(imgPath, renderToken) {
 
 function getClassDisplayName(cls) {
   return classNames[cls] ?? `cls ${cls}`;
+}
+
+// Parse all parts from a multipart response.
+// Returns [{ name: string, blob: Blob }, ...] where name is the raw Content-Disposition name value.
+function extractAllParts(buf, boundary) {
+  const bytes = new Uint8Array(buf);
+  const dec = new TextDecoder();
+  const enc = new TextEncoder();
+  const sep = enc.encode(`--${boundary}`);
+  const results = [];
+
+  // Find all boundary positions
+  const positions = [];
+  outer: for (let i = 0; i <= bytes.length - sep.length; i++) {
+    for (let j = 0; j < sep.length; j++) {
+      if (bytes[i + j] !== sep[j]) continue outer;
+    }
+    positions.push(i);
+  }
+
+  for (let pi = 0; pi < positions.length; pi++) {
+    let pos = positions[pi] + sep.length;
+    // End boundary: --boundary--
+    if (bytes[pos] === 45 && bytes[pos + 1] === 45) break;
+    // Skip \r\n after boundary line
+    if (bytes[pos] === 13 && bytes[pos + 1] === 10) pos += 2;
+
+    // Find header end (\r\n\r\n)
+    let headerEnd = -1;
+    for (let i = pos; i <= bytes.length - 4; i++) {
+      if (bytes[i] === 13 && bytes[i+1] === 10 && bytes[i+2] === 13 && bytes[i+3] === 10) {
+        headerEnd = i + 4;
+        break;
+      }
+    }
+    if (headerEnd === -1) continue;
+
+    const headerText = dec.decode(bytes.slice(pos, headerEnd));
+    const ctMatch = headerText.match(/Content-Type:\s*([^\r\n]+)/i);
+    const mimeType = ctMatch ? ctMatch[1].trim() : 'image/jpeg';
+    const nameMatch = headerText.match(/name="([^"]+)"/i);
+    const name = nameMatch ? nameMatch[1] : '';
+
+    // Body ends just before the next boundary (strip trailing \r\n)
+    const bodyEnd = pi + 1 < positions.length
+      ? positions[pi + 1] - 2
+      : bytes.length;
+
+    results.push({ name, blob: new Blob([bytes.slice(headerEnd, Math.max(headerEnd, bodyEnd))], { type: mimeType }) });
+  }
+
+  return results;
 }
 
 function extractFirstPart(buf, boundary) {
@@ -1670,7 +1787,7 @@ async function refreshCardLabel(imgPath, idx) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(currentJobId
-        ? { jobId: Number(currentJobId), imageNames: [imageName] }
+        ? { jobId: Number(currentJobId), imageNames: [imageName], view: currentView || undefined }
         : { basePath, imagePaths: [imgPath], view: currentView || undefined }
       )
     });
@@ -1787,8 +1904,16 @@ function renderLightboxFrame() {
   if (nextBtn) nextBtn.disabled = lightboxIndex === imageList.length - 1;
   if (!wrap) return;
 
-  wrap.innerHTML = `<div class="v-lb-spin">⟳</div>`;
-  loadLightboxThumb(imgPath, wrap, lightboxIndex);
+  const cachedUrl = thumbCache[imgPath];
+  if (cachedUrl) {
+    const esc = escHtml(imgPath).replace(/'/g, "\\'");
+    wrap.innerHTML = `<img id="vLbImg" class="v-lb-img" src="${cachedUrl}" alt=""
+      onload="if(window.vLbBboxDraw)vLbBboxDraw(this,'${esc}')">
+<svg id="vLbSvg" class="v-lb-svg" viewBox="0 0 1 1"></svg>`;
+  } else {
+    wrap.innerHTML = `<div class="v-lb-spin">⟳</div>`;
+    loadLightboxThumb(imgPath, wrap, lightboxIndex);
+  }
 }
 
 async function loadLightboxThumb(imgPath, wrap, captureIdx) {
@@ -1817,7 +1942,7 @@ async function loadLightboxThumb(imgPath, wrap, captureIdx) {
 
     const url = URL.createObjectURL(imgBlob);
     wrap.innerHTML = `<img id="vLbImg" class="v-lb-img" src="${url}" alt=""
-      onload="vLbBboxDraw(this,'${escHtml(imgPath).replace(/'/g, "\\'")}')">
+      onload="if(window.vLbBboxDraw)vLbBboxDraw(this,'${escHtml(imgPath).replace(/'/g, "\\'")}')">
 <svg id="vLbSvg" class="v-lb-svg" viewBox="0 0 1 1"></svg>`;
   } catch {
     if (captureIdx === lightboxIndex && wrap) wrap.innerHTML = `<div style="color:#dc3545">Error loading image</div>`;

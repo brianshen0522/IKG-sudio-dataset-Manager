@@ -4,6 +4,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import AppHeader from '../../_components/AppHeader';
 import { useCurrentUser } from '../../_components/useCurrentUser';
+import { subscribeSSE } from '@/lib/shared-sse';
 
 const STATUS_COLOR = {
   pending:   '#9ba9c3',
@@ -196,24 +197,39 @@ export default function TasksPage() {
 
   const isAdminOrDM = user?.role === 'admin' || user?.role === 'data-manager';
 
+  // Initial REST fetch so the page renders immediately without waiting for SSE
+  useEffect(() => {
+    if (authLoading || !isAdminOrDM) return;
+    fetch('/api/tasks')
+      .then((r) => r.ok ? r.json() : null)
+      .then((data) => {
+        if (data) {
+          setTasks(Array.isArray(data.tasks) ? data.tasks : []);
+          setLoading(false);
+        }
+      })
+      .catch(() => {});
+  }, [authLoading, isAdminOrDM]);
+
+  // SSE for live updates
   useEffect(() => {
     if (authLoading) return;
     if (!isAdminOrDM) { router.push('/'); return; }
 
-    const source = new EventSource('/api/tasks/stream');
-    source.addEventListener('tasks', (e) => {
-      try {
-        const data = JSON.parse(e.data);
-        setTasks(Array.isArray(data.tasks) ? data.tasks : []);
-        setStreamError(null);
+    return subscribeSSE('/api/tasks/stream', {
+      tasks: (e) => {
+        try {
+          const data = JSON.parse(e.data);
+          setTasks(Array.isArray(data.tasks) ? data.tasks : []);
+          setStreamError(null);
+          setLoading(false);
+        } catch {}
+      },
+      error: (e) => {
+        try { const d = JSON.parse(e.data); setStreamError(d.message); } catch {}
         setLoading(false);
-      } catch {}
+      },
     });
-    source.addEventListener('error', (e) => {
-      try { const d = JSON.parse(e.data); setStreamError(d.message); } catch {}
-      setLoading(false);
-    });
-    return () => source.close();
   }, [authLoading, isAdminOrDM, router]);
 
   const running  = tasks.filter((t) => t.status === 'running').length;

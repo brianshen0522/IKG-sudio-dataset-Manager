@@ -4,7 +4,7 @@ import { CONFIG } from '@/lib/manager';
 import { getInstanceByName } from '@/lib/db';
 import { getJobById, getDatasetById, getJobUserState } from '@/lib/db-datasets';
 import { getUserFromRequest } from '@/lib/auth';
-import { canAccessJob, canViewAll } from '@/lib/permissions';
+import { canAccessJob, canViewAll, canEditJob } from '@/lib/permissions';
 import fs from 'fs';
 import { buildJobEditorPaths, scanFolderImagePaths } from '@/lib/job-scope';
 import { withApiLogging } from '@/lib/api-logger';
@@ -86,7 +86,9 @@ export const GET = withApiLogging(async (req) => {
         imageMeta,
         obbMode: dataset.obbMode || 'rectangle',
         labelEditorPreloadCount: CONFIG.labelEditorPreloadCount,
-        lastImagePath: userState?.lastImagePath || ''
+        lastImagePath: userState?.lastImagePath || '',
+        canEdit: canEditJob(actor, job),
+        canDelete: !isDuplicateView && canEditJob(actor, job),
       });
     }
 
@@ -116,7 +118,8 @@ export const GET = withApiLogging(async (req) => {
         imageMeta: scanned?.imageMeta || {},
         obbMode: dataset.obbMode || 'rectangle',
         classFile: dataset.classFile || null,
-        labelEditorPreloadCount: CONFIG.labelEditorPreloadCount
+        labelEditorPreloadCount: CONFIG.labelEditorPreloadCount,
+        canDelete: !isDuplicateView,
       });
     }
 

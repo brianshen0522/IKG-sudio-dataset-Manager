@@ -9,6 +9,14 @@ import { canAccessJob } from '@/lib/permissions';
 
 export const dynamic = 'force-dynamic';
 
+async function readLabelFile(fullLabelPath) {
+  try {
+    return await fs.promises.readFile(fullLabelPath, 'utf-8');
+  } catch {
+    return '';
+  }
+}
+
 export const POST = withApiLogging(async (req) => {
   try {
     const body = await req.json();
@@ -31,21 +39,26 @@ export const POST = withApiLogging(async (req) => {
       const dataset = await getDatasetById(job.datasetId);
       if (!dataset) return NextResponse.json({ error: 'Dataset not found' }, { status: 404 });
 
-      const { imagePathSet } = buildJobEditorPaths(dataset.datasetPath, job, 'images');
+      const isDuplicateView = view === 'duplicates';
+      const labelDir = isDuplicateView
+        ? path.join(dataset.datasetPath, 'duplicate', 'labels')
+        : path.join(dataset.datasetPath, 'labels');
 
       const labels = {};
-      await Promise.all(names.map(async (imageName) => {
-        if (!isJobImagePathAllowed(`images/${imageName}`, imagePathSet)) return;
-        const labelName = imageName.replace(/\.[^.]+$/i, '.txt');
-        const fullLabelPath = path.join(dataset.datasetPath, 'labels', labelName);
-        try {
-          labels[imageName] = fs.existsSync(fullLabelPath)
-            ? fs.readFileSync(fullLabelPath, 'utf-8')
-            : '';
-        } catch {
-          labels[imageName] = '';
-        }
-      }));
+
+      if (isDuplicateView) {
+        await Promise.all(names.map(async (imageName) => {
+          const labelName = imageName.replace(/\.[^.]+$/i, '.txt');
+          labels[imageName] = await readLabelFile(path.join(labelDir, labelName));
+        }));
+      } else {
+        const { imagePathSet } = buildJobEditorPaths(dataset.datasetPath, job, 'images');
+        await Promise.all(names.map(async (imageName) => {
+          if (!isJobImagePathAllowed(`images/${imageName}`, imagePathSet)) return;
+          const labelName = imageName.replace(/\.[^.]+$/i, '.txt');
+          labels[imageName] = await readLabelFile(path.join(labelDir, labelName));
+        }));
+      }
 
       return NextResponse.json({ labels });
     }
@@ -60,14 +73,7 @@ export const POST = withApiLogging(async (req) => {
       const labelPath = imagePath
         .replace('images/', 'labels/')
         .replace(/\.(jpg|jpeg|png|bmp|gif)$/i, '.txt');
-      const fullLabelPath = path.join(basePath, labelPath);
-      try {
-        labels[imagePath] = fs.existsSync(fullLabelPath)
-          ? fs.readFileSync(fullLabelPath, 'utf-8')
-          : '';
-      } catch {
-        labels[imagePath] = '';
-      }
+      labels[imagePath] = await readLabelFile(path.join(basePath, labelPath));
     }));
 
     return NextResponse.json({ labels });

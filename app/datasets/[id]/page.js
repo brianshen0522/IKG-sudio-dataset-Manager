@@ -5,6 +5,7 @@ import { useParams, useRouter } from 'next/navigation';
 import AppHeader from '../../_components/AppHeader';
 import { useCurrentUser } from '../../_components/useCurrentUser';
 import FileBrowser from '../../_components/FileBrowser';
+import { subscribeSSE } from '@/lib/shared-sse';
 
 const STATUS_COLOR = {
   unassigned: '#9ba9c3',
@@ -420,30 +421,21 @@ export default function DatasetDetailPage() {
   useEffect(() => {
     if (authLoading) return undefined;
 
-    const source = new EventSource(`/api/datasets/${id}/stream`);
-    source.addEventListener('dataset', (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        if (data.dataset) setDataset(data.dataset);
-        if (Array.isArray(data.jobs)) setJobs(data.jobs);
-        setLoading(false);
-      } catch {
-        // Ignore malformed SSE payloads.
-      }
+    return subscribeSSE(`/api/datasets/${id}/stream`, {
+      dataset: (e) => {
+        try {
+          const data = JSON.parse(e.data);
+          if (data.dataset) setDataset(data.dataset);
+          if (Array.isArray(data.jobs)) setJobs(data.jobs);
+          setLoading(false);
+        } catch {
+          // Ignore malformed SSE payloads.
+        }
+      },
+      deleted:  () => router.push('/'),
+      forbidden: () => router.push('/'),
+      error:    () => setLoading(false),
     });
-    source.addEventListener('deleted', () => {
-      router.push('/');
-    });
-    source.addEventListener('forbidden', () => {
-      router.push('/');
-    });
-    source.addEventListener('error', () => {
-      setLoading(false);
-    });
-
-    return () => {
-      source.close();
-    };
   }, [authLoading, id, router]);
 
   function updateJob(updated) {

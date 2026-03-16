@@ -29,7 +29,13 @@ export const GET = withApiLogging(async function handler(req, { params }) {
     if (rows.length === 0) return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
   }
 
-  dataset.hasDuplicateFolder = fs.existsSync(path.join(dataset.datasetPath, 'duplicate'));
+  const dupImagesDir = path.join(dataset.datasetPath, 'duplicate', 'images');
+  try {
+    const dupFiles = await fs.promises.readdir(dupImagesDir);
+    dataset.hasDuplicateFolder = dupFiles.some(f => /\.(jpg|jpeg|png|bmp|gif|webp)$/i.test(f));
+  } catch {
+    dataset.hasDuplicateFolder = false;
+  }
   return NextResponse.json({ dataset });
 });
 

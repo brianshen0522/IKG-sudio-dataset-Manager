@@ -6,6 +6,7 @@ import AppHeader from './_components/AppHeader';
 import { useCurrentUser } from './_components/useCurrentUser';
 import FileBrowser from './_components/FileBrowser';
 import DatasetBrowser from './_components/DatasetBrowser';
+import { subscribeSSE } from '@/lib/shared-sse';
 
 const STATUS_COLOR = {
   unassigned: '#9ba9c3',
@@ -437,24 +438,19 @@ export default function DashboardPage() {
   useEffect(() => {
     if (authLoading || !isAdminOrDM) return undefined;
 
-    const source = new EventSource('/api/datasets/stream');
-    source.addEventListener('datasets', (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        setDatasets(Array.isArray(data.datasets) ? data.datasets : []);
-        setJobs(data.jobsByDataset && typeof data.jobsByDataset === 'object' ? data.jobsByDataset : {});
-        setLoading(false);
-      } catch {
-        // Ignore malformed SSE payloads.
-      }
+    return subscribeSSE('/api/datasets/stream', {
+      datasets: (e) => {
+        try {
+          const data = JSON.parse(e.data);
+          setDatasets(Array.isArray(data.datasets) ? data.datasets : []);
+          setJobs(data.jobsByDataset && typeof data.jobsByDataset === 'object' ? data.jobsByDataset : {});
+          setLoading(false);
+        } catch {
+          // Ignore malformed SSE payloads.
+        }
+      },
+      error: () => setLoading(false),
     });
-    source.addEventListener('error', () => {
-      setLoading(false);
-    });
-
-    return () => {
-      source.close();
-    };
   }, [authLoading, isAdminOrDM]);
 
   // For regular users: show their assigned jobs grouped by dataset
@@ -595,16 +591,17 @@ function MyJobsTab() {
       .then((data) => { if (!cancelled) { setJobs(data.jobs || []); setLoading(false); } })
       .catch(() => { if (!cancelled) setLoading(false); });
 
-    const source = new EventSource('/api/my-jobs/stream');
-    source.addEventListener('jobs', (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        if (!cancelled) { setJobs(Array.isArray(data.jobs) ? data.jobs : []); setLoading(false); }
-      } catch {}
+    const unsub = subscribeSSE('/api/my-jobs/stream', {
+      jobs: (e) => {
+        try {
+          const data = JSON.parse(e.data);
+          if (!cancelled) { setJobs(Array.isArray(data.jobs) ? data.jobs : []); setLoading(false); }
+        } catch {}
+      },
+      error: () => { if (!cancelled) setLoading(false); },
     });
-    source.addEventListener('error', () => { if (!cancelled) setLoading(false); });
 
-    return () => { cancelled = true; source.close(); };
+    return () => { cancelled = true; unsub(); };
   }, []);
 
   if (loading) return <div style={styles.loading}>Loading…</div>;
@@ -680,28 +677,24 @@ function UserDashboard({ user }) {
 
     load();
 
-    const source = new EventSource('/api/my-jobs/stream');
-    source.addEventListener('jobs', (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        if (!cancelled) {
-          setJobs(Array.isArray(data.jobs) ? data.jobs : []);
-          setLoading(false);
+    const unsub = subscribeSSE('/api/my-jobs/stream', {
+      jobs: (e) => {
+        try {
+          const data = JSON.parse(e.data);
+          if (!cancelled) {
+            setJobs(Array.isArray(data.jobs) ? data.jobs : []);
+            setLoading(false);
+          }
+        } catch {
+          // Ignore malformed SSE payloads.
         }
-      } catch {
-        // Ignore malformed SSE payloads.
-      }
-    });
-
-    source.addEventListener('error', () => {
-      if (!cancelled) {
-        setLoading(false);
-      }
+      },
+      error: () => { if (!cancelled) setLoading(false); },
     });
 
     return () => {
       cancelled = true;
-      source.close();
+      unsub();
     };
   }, []);
 

@@ -90,7 +90,13 @@ export async function GET(req, { params }) {
           });
           const jobs = annotateJobsWithImageCount(dataset.datasetPath, rawJobs);
 
-          dataset.hasDuplicateFolder = fs.existsSync(path.join(dataset.datasetPath, 'duplicate'));
+          const dupImagesDir = path.join(dataset.datasetPath, 'duplicate', 'images');
+          try {
+            const dupFiles = await fs.promises.readdir(dupImagesDir);
+            dataset.hasDuplicateFolder = dupFiles.some(f => /\.(jpg|jpeg|png|bmp|gif|webp)$/i.test(f));
+          } catch {
+            dataset.hasDuplicateFolder = false;
+          }
           const payloadData = { dataset, jobs };
           const payload = JSON.stringify(payloadData);
           if (payload !== lastPayload) {

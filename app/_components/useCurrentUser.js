@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import { subscribeSSE } from '@/lib/shared-sse';
 
 function forceLogout() {
   fetch('/api/auth/logout', { method: 'POST' }).finally(() => {
@@ -32,13 +33,9 @@ export function useCurrentUser() {
   useEffect(() => {
     if (!user) return;
 
-    const source = new EventSource('/api/auth/stream');
-    source.addEventListener('invalidate', () => {
-      source.close();
-      forceLogout();
+    return subscribeSSE('/api/auth/stream', {
+      invalidate: () => forceLogout(),
     });
-
-    return () => source.close();
   }, [user?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return { user, loading, dbOffline };

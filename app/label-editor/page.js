@@ -1,15 +1,48 @@
 "use client";
 
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from '../_components/LanguageProvider';
 import './label-editor.css';
 
 export default function LabelEditorPage() {
   const apiRef = useRef(null);
   const { t, isReady } = useTranslation();
+  const [accessState, setAccessState] = useState('checking'); // 'checking' | 'ok' | 'forbidden'
 
   useEffect(() => {
-    if (!isReady) {
+    if (!isReady) return;
+
+    const params = new URLSearchParams(window.location.search);
+    const jobId = params.get('jobId');
+    const datasetId = params.get('datasetId');
+
+    let configUrl = null;
+    if (jobId) {
+      const view = params.get('view') || '';
+      configUrl = `/api/label-editor/instance-config?jobId=${encodeURIComponent(jobId)}${view ? `&view=${encodeURIComponent(view)}` : ''}`;
+    } else if (datasetId) {
+      configUrl = `/api/label-editor/instance-config?datasetId=${encodeURIComponent(datasetId)}`;
+    }
+
+    if (!configUrl) {
+      setAccessState('ok');
+      return;
+    }
+
+    fetch(configUrl).then(async (res) => {
+      if (res.status === 403) {
+        setAccessState('forbidden');
+      } else if (res.ok && jobId) {
+        const data = await res.json().catch(() => ({}));
+        setAccessState(data.canEdit === false ? 'forbidden' : 'ok');
+      } else {
+        setAccessState('ok');
+      }
+    }).catch(() => setAccessState('ok'));
+  }, [isReady]);
+
+  useEffect(() => {
+    if (!isReady || accessState !== 'ok') {
       return;
     }
     let active = true;
@@ -23,7 +56,7 @@ export default function LabelEditorPage() {
     return () => {
       active = false;
     };
-  }, [isReady]);
+  }, [isReady, accessState]);
 
   useEffect(() => {
     if (apiRef.current?.updateDeleteButton) {
@@ -45,8 +78,29 @@ export default function LabelEditorPage() {
     api[method](...args);
   };
 
-  if (!isReady) {
+  if (!isReady || accessState === 'checking') {
     return <div style={{ padding: '20px', color: '#aaa' }}>Loading...</div>;
+  }
+
+  if (accessState === 'forbidden') {
+    return (
+      <div style={{
+        display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+        height: '100vh', background: '#1a1a2e', color: '#fff', gap: '16px', textAlign: 'center', padding: '20px'
+      }}>
+        <div style={{ fontSize: '64px', lineHeight: 1 }}>🚫</div>
+        <h1 style={{ fontSize: '28px', fontWeight: 700, margin: 0 }}>Access Denied</h1>
+        <p style={{ color: '#aaa', margin: 0, maxWidth: '360px' }}>
+          You do not have permission to edit this job. Only the assigned user can open the label editor.
+        </p>
+        <button
+          onClick={() => window.history.back()}
+          style={{ marginTop: '8px', padding: '10px 24px', background: '#007bff', color: '#fff', border: 'none', borderRadius: '6px', cursor: 'pointer', fontSize: '15px' }}
+        >
+          Go Back
+        </button>
+      </div>
+    );
   }
 
   return (

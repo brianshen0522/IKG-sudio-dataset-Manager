@@ -4,26 +4,23 @@ import { useRouter, usePathname } from 'next/navigation';
 import { useState, useEffect, useRef } from 'react';
 import { useCurrentUser } from './useCurrentUser';
 import DbOfflineBanner from './DbOfflineBanner';
+import { subscribeSSE } from '@/lib/shared-sse';
 
 function useRunningTaskCount(enabled) {
   const [count, setCount] = useState(0);
-  const sourceRef = useRef(null);
 
   useEffect(() => {
     if (!enabled) return;
 
-    const source = new EventSource('/api/tasks/stream');
-    sourceRef.current = source;
-
-    source.addEventListener('tasks', (e) => {
-      try {
-        const { tasks } = JSON.parse(e.data);
-        const running = (tasks || []).filter((t) => t.status === 'running' || t.status === 'pending').length;
-        setCount(running);
-      } catch {}
+    return subscribeSSE('/api/tasks/stream', {
+      tasks: (e) => {
+        try {
+          const { tasks } = JSON.parse(e.data);
+          const running = (tasks || []).filter((t) => t.status === 'running' || t.status === 'pending').length;
+          setCount(running);
+        } catch {}
+      },
     });
-
-    return () => source.close();
   }, [enabled]);
 
   return count;

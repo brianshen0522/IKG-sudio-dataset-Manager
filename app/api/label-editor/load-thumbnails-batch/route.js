@@ -68,11 +68,15 @@ export const POST = withApiLogging(async (req) => {
         continue;
       }
       const fullPath = path.resolve(path.join(baseResolved, imagePath));
-      if (!fullPath.startsWith(basePrefix) || !fs.existsSync(fullPath)) {
+      if (!fullPath.startsWith(basePrefix)) {
         continue;
       }
-
-      const buffer = fs.readFileSync(fullPath);
+      let buffer;
+      try {
+        buffer = await fs.promises.readFile(fullPath);
+      } catch {
+        continue;
+      }
       const safeName = encodeURIComponent(imagePath);
 
       if (CONFIG.thumbnailQuality >= 100) {
