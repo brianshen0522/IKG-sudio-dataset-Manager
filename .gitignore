@@ -12,6 +12,7 @@ out/
 .env
 .env.dev
 compose.yml
+compose.dev.yml
 instances.json
 __pycache__/
 *.pyc

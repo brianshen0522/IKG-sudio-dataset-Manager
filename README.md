@@ -19,7 +19,7 @@ Web application for managing YOLO datasets, multi-user job assignment, duplicate
 - Docker + Docker Compose (recommended)
 - Node.js 20+ and PostgreSQL 16+ if running locally
 
-## Quick Start (Docker)
+## Quick Start (Docker — Production)
 
 ### 1. Copy and configure the compose file
 
@@ -61,6 +61,34 @@ docker compose up -d
 Open `http://localhost:3000` (or the `PUBLIC_ADDRESS`:`MANAGER_PORT` you configured).
 
 The app seeds an initial admin account on first startup — username `admin`, password from `INITIAL_ADMIN_PASSWORD`.
+
+---
+
+## Quick Start (Docker — Development)
+
+The dev compose file mounts your source code into a `node:20-slim` container and runs `npm run dev`, giving you hot reload without a build step.
+
+### 1. Copy and configure
+
+```bash
+cp compose.dev.example.yml compose.dev.yml
+```
+
+Edit `compose.dev.yml` and uncomment the dataset path volume mounts you need (same rules as production — same absolute path as on the host).
+
+### 2. Configure environment
+
+Same `.env` as production. `API_LOG_LEVEL` defaults to `debug` in the dev compose.
+
+### 3. Start
+
+```bash
+docker compose -f compose.dev.yml up
+```
+
+The dev server starts at `http://localhost:3000`. Source changes reload automatically. PostgreSQL data is stored in `./postgres-data-dev` (separate from any production data on the same machine).
+
+> **Note:** `compose.dev.yml` is git-ignored. Commit `compose.dev.example.yml` and edit `compose.dev.yml` locally.
 
 ---
 

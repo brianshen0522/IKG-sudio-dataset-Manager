@@ -1,52 +1,38 @@
 services:
   postgres:
     image: postgres:16
-    container_name: IKG-studio-dataset-manager-postgres
-    deploy:
-      resources:
-        limits:
-          memory: 256M
-        reservations:
-          memory: 128M
+    container_name: IKG-studio-dataset-manager-postgres-dev
     ports:
       - "5432:5432"
     volumes:
-      - ./postgres-data:/var/lib/postgresql/data
+      - ./postgres-data-dev:/var/lib/postgresql/data
     environment:
       - POSTGRES_DB=datasets_manager
       - POSTGRES_USER=studio
       - POSTGRES_PASSWORD=studio
     restart: unless-stopped
 
-  ikg-studio-dataset-manager:
-    build: .
-    container_name: IKG-studio-dataset-manager
-    deploy:
-      resources:
-        limits:
-          memory: 512M
-        reservations:
-          memory: 128M
+  ikg-studio-dataset-manager-dev:
+    # Runs the Next.js dev server with hot reload — no build step needed
+    image: node:20-slim
+    container_name: IKG-studio-dataset-manager-dev
+    working_dir: /app
+    command: sh -c "npm install && npm run dev"
     depends_on:
       - postgres
     ports:
       - "${MANAGER_PORT:-3000}:${MANAGER_PORT:-3000}"
     volumes:
-      # Mount every path you use as uncheck_path or check_path in dataset type settings.
-      # Each path must be mounted at the SAME absolute path as on the host
-      # so the paths stored in the database match what the container sees.
-      #
-      # Local disk examples:
+      # Mount source code for hot reload
+      - .:/app
+      # Prevent container node_modules from overwriting host node_modules
+      - /app/node_modules
+      # Mount every path you use as uncheck_path or check_path at the SAME absolute path as on host
       #   - /data/work:/data/work:rw
-      #   - /mnt/disk2/check:/mnt/disk2/check:rw
-      #
-      # SMB / NFS share (mount on host first, then reference here):
-      #   - /mnt/smb/datasets:/mnt/smb/datasets:rw
-      #
-      - /data/work:/data/work:rw          # example uncheck_path
-      - /data/check:/data/check:rw        # example check_path
+      #   - /data/check:/data/check:rw
       - ./deletion_logs:/app/deletion_logs:rw
     environment:
+      - NODE_ENV=development
       - MANAGER_PORT=${MANAGER_PORT:-3000}
       - PUBLIC_ADDRESS=${PUBLIC_ADDRESS:-localhost}
       - DEFAULT_IOU_THRESHOLD=${DEFAULT_IOU_THRESHOLD:-0.8}
@@ -59,5 +45,5 @@ services:
       - THUMBNAIL_QUALITY=${THUMBNAIL_QUALITY:-50}
       - JWT_SECRET=${JWT_SECRET:?JWT_SECRET is required}
       - INITIAL_ADMIN_PASSWORD=${INITIAL_ADMIN_PASSWORD:-admin}
+      - API_LOG_LEVEL=${API_LOG_LEVEL:-debug}
     restart: unless-stopped
-
