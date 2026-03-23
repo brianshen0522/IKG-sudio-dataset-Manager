@@ -13,7 +13,15 @@ async function log(jobId, level, message) {
 
 function rsyncWithLogs(src, dst, jobId) {
   return new Promise((resolve, reject) => {
-    const args = ['-a', '--checksum', '--stats', '--human-readable', src + '/', dst + '/'];
+    // Only transfer images/, labels/, and classes.txt (if present)
+    const args = [
+      '-a', '--checksum', '--stats', '--human-readable',
+      '--include=images/', '--include=images/**',
+      '--include=labels/', '--include=labels/**',
+      '--include=classes.txt',
+      '--exclude=*',
+      src + '/', dst + '/',
+    ];
     const proc = spawn('rsync', args);
 
     let stderrBuf = '';
