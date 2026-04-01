@@ -1,23 +1,31 @@
 # IKG Studio Dataset Manager
 
-Web application for managing YOLO datasets, multi-user job assignment, duplicate handling, and the built-in label editor.
+Web application for managing YOLO datasets — multi-user job assignment, duplicate handling, built-in label editor, and archive tracking.
 
 ## What It Does
 
 - **Dataset Types** — admin configures types (e.g. `dice`, `roulette`) with an *uncheck path* (work-in-progress) and a *check path* (completed). Datasets can be moved from uncheck → check via rsync with hash verification.
 - **Dataset & Job management** — datasets are split into fixed-size jobs and assigned to labelers. Progress is tracked per user per job.
 - **Multi-dataset creation** — add multiple datasets at once by selecting several subdirectories in one flow, with shared or per-dataset duplicate settings and optional auto-assign.
-- **Move to Check** — admin/data-manager initiates a background rsync move, verifies a metadata hash, removes the source, and removes the dataset from the system automatically.
-- **Label editor** — browser-based YOLO bounding-box / OBB editor with multi-image quick-edit tools.
+- **Move to Check** — admin/data-manager initiates a background rsync move, verifies a metadata hash, removes the source files, and archives the dataset record (the record is retained for history rather than deleted).
+- **Archive** — after a successful move, datasets appear on the Archive page with full statistics: edit counts, deletion counts, job assignments, and who moved it to done.
+- **Edit statistics** — the system tracks which label files were edited per job by hashing every `labels/*.txt` at baseline (when a dataset is added) and updating the hash on every save. The dataset detail page and dashboard show edited-file and deleted-image counts in real time.
+- **Bulk move** — admin/data-manager can select multiple datasets and move them all to check in one operation.
+- **Label editor** — browser-based YOLO bounding-box / OBB editor with multi-image quick-edit tools and thumbnail strip.
 - **Viewer** — browse all images in a dataset or job; admin/data-manager view is read-only (no edit, no delete).
 - **Duplicate detection** — configurable IoU-based duplicate scan runs as a background task when a dataset is added.
+- **Real-time updates** — Server-Sent Events push job status, move progress, task logs, and edit statistics live to all open tabs. A SharedWorker pools connections so multiple tabs share one EventSource per URL.
 - **Role-based access** — three roles: `admin`, `data-manager`, `user`. All routes are JWT-protected.
-- **PostgreSQL** — stores users, datasets, jobs, settings, background task logs, and assignment history.
+- **PostgreSQL** — stores users, datasets, jobs, settings, background task logs, assignment history, label hashes, and image deletions.
+
+---
 
 ## Requirements
 
 - Docker + Docker Compose (recommended)
 - Node.js 20+ and PostgreSQL 16+ if running locally
+
+---
 
 ## Quick Start (Docker — Production)
 
@@ -163,15 +171,17 @@ my-dataset/
   labels/
 ```
 
+When a dataset is created, a background task runs automatically: it computes an MD5 baseline hash for every `labels/*.txt` file, storing each hash in the database so the system can detect future edits.
+
 ### Move to Check
 
-On the dataset detail page, admin/data-manager can click **Move to Check**. The system will:
+On the dataset detail page (or from the dashboard for bulk selection), admin/data-manager can click **Move to Check**. The system will:
 
 1. Enqueue a background job via pg-boss
 2. rsync the dataset directory to `check_path/subdir`
 3. Verify a metadata hash (filename + size + mtime) between source and destination
 4. Delete the source directory
-5. Remove the dataset record from the database
+5. **Archive** the dataset record (record is retained with `archived_at` timestamp; removed from the main dashboard)
 
 While a move is in progress the dataset is locked — edits, deletes, and job actions are blocked. The dashboard card shows the current move status (Pending / Moving / Verifying). If the move fails, the error is shown on the detail page with a **Retry** option. The retry limit is configurable in Settings (`move_retry_limit`, default `3`).
 
@@ -179,12 +189,45 @@ Progress for both duplicate-scan and move-to-check jobs is visible in the **Back
 
 ---
 
+## Archive
+
+After a successful move-to-check, the dataset is archived. Admin and data-manager can view all archived datasets at **/archive**:
+
+- Dataset name, original path, and destination path
+- Who moved it to done and when
+- Per-job edit statistics: how many label files were edited and how many images were deleted
+- Full job assignment history (who worked on each job and for how long)
+
+Archived records are read-only — they are never deleted from the database.
+
+---
+
+## Edit Statistics
+
+The system tracks editing activity at the per-job and per-dataset level.
+
+**How it works:**
+1. When a dataset is created, a background task hashes every `labels/*.txt` file (MD5, with coordinate precision normalization) and stores the `initial_hash`.
+2. Every time the label editor saves a file, the system recomputes the hash and stores it as `current_hash`.
+3. A file is counted as **edited** when `current_hash ≠ initial_hash` (or the file was created after the baseline, i.e. `initial_hash IS NULL`).
+4. A file is counted as **deleted** when a delete-images action records it in the `deleted_images` table.
+
+**Where stats are shown:**
+- Dataset detail page → progress card (total edited files, total deleted images for the whole dataset)
+- Dataset detail page → jobs table (per-job edited and deleted counts)
+- Dashboard job cards (user and data-manager views) — per-job counts alongside current image count
+- Archive page — per-job and per-dataset totals for completed datasets
+
+Stats update automatically every ~2 seconds via SSE while the dataset page is open.
+
+---
+
 ## Roles
 
 | Role | Capabilities |
 | --- | --- |
-| `admin` | Everything: dataset types, system settings, users, move to check |
-| `data-manager` | Create/manage datasets, assign/reassign jobs, move to check, view dataset types |
+| `admin` | Everything: dataset types, system settings, users, move to check, archive |
+| `data-manager` | Create/manage datasets, assign/reassign jobs, move to check, view archive, bulk move |
 | `user` | View assigned jobs, open label editor, mark jobs as done |
 
 ---
@@ -203,6 +246,39 @@ DUPLICATE_RULES=[{"pattern":"invalid","action":"skip","labels":0,"priority":1},{
 ```
 
 Rule fields: `pattern` (substring match on dataset path), `action`, `labels` (0 = all), `priority` (lower wins). `DUPLICATE_DEFAULT_ACTION` applies when no rule matches.
+
+---
+
+## Real-Time Updates
+
+The app uses Server-Sent Events (SSE) to push changes live without polling:
+
+| Stream URL | What it pushes |
+| --- | --- |
+| `/api/datasets/[id]/stream` | Job statuses, move progress, edit stats for one dataset |
+| `/api/my-jobs/stream` | Assigned jobs list for the current user |
+| `/api/tasks/stream` | Background task status and log lines |
+
+A **SharedWorker** (`public/sse-worker.js`) is used on the client so all browser tabs from the same origin share one EventSource per URL. New tabs receive the last cached message immediately without waiting for the next server push.
+
+---
+
+## Database Tables
+
+| Table | Purpose |
+| --- | --- |
+| `users` | Accounts, roles, hashed passwords, token version |
+| `datasets` | Dataset metadata, move status, archive timestamp/path |
+| `jobs` | Job ranges, assignment, status, image name anchors |
+| `job_user_state` | Per-user last image, selected images, filter/sort state |
+| `job_assignment_history` | Audit log of all assignments and reassignments |
+| `dataset_types` | Type configuration (name, uncheck_path, check_path) |
+| `system_settings` | Global settings (job_size, move_retry_limit, etc.) |
+| `user_preferences` | Per-user keyboard shortcuts |
+| `label_file_hashes` | Baseline and current hash per label file for edit detection |
+| `deleted_images` | Record of every image deletion (job, user, timestamp) |
+| `task_logs` | Human-readable log lines for pg-boss background tasks |
+| `instances` | Legacy dataset records (migrated from `instances.json`) |
 
 ---
 
@@ -239,6 +315,8 @@ The initial admin account is seeded on first startup if the `users` table is emp
 | Move fails hash mismatch | Usually a partial rsync; retry will re-rsync and re-verify |
 | Public address wrong in shared links | Set `PUBLIC_ADDRESS` in `.env` |
 | Docker build fails with "parent snapshot does not exist" | Corrupted BuildKit cache — run `docker builder prune -f && docker compose build --no-cache` |
+| Edit stats always show 0 | Baseline hash task may not have completed — check Background Tasks page for errors |
+| Archive page empty after move | Check that the move completed successfully (no errors in Background Tasks) |
 
 ---
 
