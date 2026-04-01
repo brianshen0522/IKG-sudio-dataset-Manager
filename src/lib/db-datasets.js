@@ -245,12 +245,12 @@ export async function getAllDatasets({ role, userId } = {}) {
     let result;
     if (role === 'admin' || role === 'data-manager') {
       result = await client.query(
-        baseQuery + ' GROUP BY d.id, dt.name ORDER BY d.created_at ASC'
+        baseQuery + ' WHERE d.archived_at IS NULL GROUP BY d.id, dt.name ORDER BY d.created_at ASC'
       );
     } else {
       result = await client.query(
         baseQuery +
-        ' WHERE d.id IN (SELECT DISTINCT dataset_id FROM jobs WHERE assigned_to = $1)' +
+        ' WHERE d.archived_at IS NULL AND d.id IN (SELECT DISTINCT dataset_id FROM jobs WHERE assigned_to = $1)' +
         ' GROUP BY d.id, dt.name ORDER BY d.created_at ASC',
         [userId]
       );
@@ -749,6 +749,325 @@ export async function upsertJobUserState(jobId, userId, fields) {
       insertVals
     );
     return rowToJobUserState(result.rows[0]);
+  } finally {
+    client.release();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Edit statistics (live, for active datasets)
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns per-job edit stats for a dataset.
+ * Result: Map<jobId, { editedFiles: number, deletedImages: number }>
+ */
+export async function getJobEditStats(datasetId) {
+  await ensureInitialized();
+  // Use pool.query() directly so each concurrent query gets its own client.
+  // A single pg Client is not safe for concurrent queries.
+  const [editResult, delResult] = await Promise.all([
+    getPool().query(
+      `SELECT job_id,
+              COUNT(*) FILTER (WHERE initial_hash IS NULL OR initial_hash != current_hash) AS edited_count
+       FROM label_file_hashes
+       WHERE dataset_id = $1
+       GROUP BY job_id`,
+      [datasetId]
+    ),
+    getPool().query(
+      `SELECT job_id, COUNT(*) AS deleted_count
+       FROM deleted_images
+       WHERE dataset_id = $1
+       GROUP BY job_id`,
+      [datasetId]
+    ),
+  ]);
+
+  const map = new Map();
+  for (const r of editResult.rows) {
+    map.set(r.job_id, { editedFiles: Number(r.edited_count), deletedImages: 0 });
+  }
+  for (const r of delResult.rows) {
+    const existing = map.get(r.job_id) ?? { editedFiles: 0, deletedImages: 0 };
+    existing.deletedImages = Number(r.deleted_count);
+    map.set(r.job_id, existing);
+  }
+  return map;
+}
+
+// ---------------------------------------------------------------------------
+// Label file hash tracking
+// ---------------------------------------------------------------------------
+
+/**
+ * Insert or update the current_hash for a single label file.
+ * initial_hash is only set on INSERT (never overwritten).
+ * A filename with no existing baseline row (new label) is inserted with
+ * initial_hash = NULL to signal it was created after the baseline scan.
+ */
+export async function upsertLabelFileHash(datasetId, jobId, filename, currentHash) {
+  await ensureInitialized();
+  const client = await getPool().connect();
+  try {
+    await client.query(
+      `INSERT INTO label_file_hashes (dataset_id, job_id, filename, initial_hash, current_hash, updated_at)
+       VALUES ($1, $2, $3, NULL, $4, NOW())
+       ON CONFLICT (job_id, filename) DO UPDATE
+         SET current_hash = $4, updated_at = NOW()`,
+      [datasetId, jobId, filename, currentHash]
+    );
+  } finally {
+    client.release();
+  }
+}
+
+export async function getLabelFileHash(datasetId, jobId, filename) {
+  await ensureInitialized();
+  const client = await getPool().connect();
+  try {
+    const result = await client.query(
+      `SELECT initial_hash, current_hash
+       FROM label_file_hashes
+       WHERE dataset_id = $1 AND job_id = $2 AND filename = $3`,
+      [datasetId, jobId, filename]
+    );
+    const row = result.rows[0];
+    if (!row) return null;
+    return {
+      initialHash: row.initial_hash,
+      currentHash: row.current_hash,
+    };
+  } finally {
+    client.release();
+  }
+}
+
+export async function updateLabelFileHashes(datasetId, jobId, filename, initialHash, currentHash) {
+  await ensureInitialized();
+  const client = await getPool().connect();
+  try {
+    await client.query(
+      `UPDATE label_file_hashes
+       SET initial_hash = $4, current_hash = $5, updated_at = NOW()
+       WHERE dataset_id = $1 AND job_id = $2 AND filename = $3`,
+      [datasetId, jobId, filename, initialHash, currentHash]
+    );
+  } finally {
+    client.release();
+  }
+}
+
+export async function deleteLabelFileHash(datasetId, jobId, filename) {
+  await ensureInitialized();
+  const client = await getPool().connect();
+  try {
+    await client.query(
+      `DELETE FROM label_file_hashes
+       WHERE dataset_id = $1 AND job_id = $2 AND filename = $3`,
+      [datasetId, jobId, filename]
+    );
+  } finally {
+    client.release();
+  }
+}
+
+export async function listEditedLabelFilenames(jobId) {
+  await ensureInitialized();
+  const client = await getPool().connect();
+  try {
+    const result = await client.query(
+      `SELECT filename
+       FROM label_file_hashes
+       WHERE job_id = $1
+         AND (initial_hash IS NULL OR initial_hash != current_hash)
+       ORDER BY filename ASC`,
+      [jobId]
+    );
+    return result.rows.map((row) => row.filename);
+  } finally {
+    client.release();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Deleted image tracking
+// ---------------------------------------------------------------------------
+
+/**
+ * Record that an image was deleted during a labeling job.
+ * jobId may be null for legacy path-based deletions.
+ */
+export async function recordImageDeletion(datasetId, jobId, imageName, deletedBy) {
+  await ensureInitialized();
+  const client = await getPool().connect();
+  try {
+    await client.query(
+      `INSERT INTO deleted_images (dataset_id, job_id, image_name, deleted_by, deleted_at)
+       VALUES ($1, $2, $3, $4, NOW())`,
+      [datasetId, jobId || null, imageName, deletedBy || null]
+    );
+  } finally {
+    client.release();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Dataset archive (after move-to-done)
+// ---------------------------------------------------------------------------
+
+/**
+ * Mark a dataset as archived (instead of deleting it).
+ * Called by move-dataset-worker after a successful move.
+ */
+export async function archiveDataset(id, archivedBy, archivedToPath) {
+  await ensureInitialized();
+  const client = await getPool().connect();
+  try {
+    await client.query(
+      `UPDATE datasets
+       SET archived_at = NOW(), archived_by = $2, archived_to_path = $3,
+           move_status = 'archived', updated_at = NOW()
+       WHERE id = $1`,
+      [id, archivedBy || null, archivedToPath || null]
+    );
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Return all archived datasets (admin/data-manager only) with their jobs,
+ * edit stats, deletion counts, assignment history, and archive metadata.
+ */
+export async function getArchivedDatasets() {
+  await ensureInitialized();
+  const client = await getPool().connect();
+  try {
+    // Fetch archived datasets.
+    const dsResult = await client.query(`
+      SELECT
+        d.*,
+        dt.name   AS type_name,
+        u.username AS archived_by_username
+      FROM datasets d
+      LEFT JOIN dataset_types dt ON dt.id = d.type_id
+      LEFT JOIN users u          ON u.id  = d.archived_by
+      WHERE d.archived_at IS NOT NULL
+      ORDER BY d.archived_at DESC
+    `);
+
+    if (dsResult.rows.length === 0) return [];
+
+    const datasetIds = dsResult.rows.map((r) => r.id);
+
+    // Fetch all jobs for these datasets.
+    const jobsResult = await client.query(`
+      SELECT j.*, u.username AS assigned_to_username
+      FROM jobs j
+      LEFT JOIN users u ON u.id = j.assigned_to
+      WHERE j.dataset_id = ANY($1)
+      ORDER BY j.dataset_id ASC, j.job_index ASC
+    `, [datasetIds]);
+
+    // Fetch edit stats per job (edited = initial_hash != current_hash OR initial_hash IS NULL).
+    const editResult = await client.query(`
+      SELECT
+        job_id,
+        COUNT(*) FILTER (WHERE initial_hash IS NULL OR initial_hash != current_hash) AS edited_count
+      FROM label_file_hashes
+      WHERE dataset_id = ANY($1)
+      GROUP BY job_id
+    `, [datasetIds]);
+
+    // Fetch deletion counts per job.
+    const delResult = await client.query(`
+      SELECT job_id, COUNT(*) AS deleted_count
+      FROM deleted_images
+      WHERE dataset_id = ANY($1)
+      GROUP BY job_id
+    `, [datasetIds]);
+
+    // Fetch assignment history for all jobs of these datasets.
+    const jobIds = jobsResult.rows.map((r) => r.id);
+    let historyRows = [];
+    if (jobIds.length > 0) {
+      const histResult = await client.query(`
+        SELECT h.*,
+               fa.username AS from_username,
+               ta.username AS to_username,
+               ab.username AS action_by_username
+        FROM job_assignment_history h
+        LEFT JOIN users fa ON fa.id = h.from_user_id
+        LEFT JOIN users ta ON ta.id = h.to_user_id
+        LEFT JOIN users ab ON ab.id = h.action_by
+        WHERE h.job_id = ANY($1)
+        ORDER BY h.job_id ASC, h.created_at ASC
+      `, [jobIds]);
+      historyRows = histResult.rows;
+    }
+
+    // Index lookups.
+    const editMap  = new Map(editResult.rows.map((r) => [r.job_id, Number(r.edited_count)]));
+    const delMap   = new Map(delResult.rows.map((r) => [r.job_id, Number(r.deleted_count)]));
+    const histMap  = new Map();
+    for (const h of historyRows) {
+      if (!histMap.has(h.job_id)) histMap.set(h.job_id, []);
+      histMap.get(h.job_id).push({
+        id: h.id,
+        fromUser: h.from_user_id ? { id: h.from_user_id, username: h.from_username } : null,
+        toUser:   h.to_user_id   ? { id: h.to_user_id,   username: h.to_username }   : null,
+        actionBy: { id: h.action_by, username: h.action_by_username },
+        action:   h.action,
+        createdAt: h.created_at ? h.created_at.toISOString() : null,
+      });
+    }
+
+    // Group jobs by dataset.
+    const jobsByDataset = new Map();
+    for (const row of jobsResult.rows) {
+      if (!jobsByDataset.has(row.dataset_id)) jobsByDataset.set(row.dataset_id, []);
+      const editedFiles  = editMap.get(row.id) ?? 0;
+      const deletedImages = delMap.get(row.id) ?? 0;
+      jobsByDataset.get(row.dataset_id).push({
+        id: row.id,
+        jobIndex: row.job_index,
+        status: row.status,
+        assignedTo: row.assigned_to,
+        assignedToUsername: row.assigned_to_username || null,
+        assignedAt: row.assigned_at ? row.assigned_at.toISOString() : null,
+        labelingStartedAt: row.labeling_started_at ? row.labeling_started_at.toISOString() : null,
+        completedAt: row.completed_at ? row.completed_at.toISOString() : null,
+        editedFiles,
+        deletedImages,
+        history: histMap.get(row.id) ?? [],
+      });
+    }
+
+    // Build final result.
+    return dsResult.rows.map((row) => {
+      const jobs = jobsByDataset.get(row.id) ?? [];
+      const totalEdited  = jobs.reduce((s, j) => s + j.editedFiles, 0);
+      const totalDeleted = jobs.reduce((s, j) => s + j.deletedImages, 0);
+      return {
+        id: row.id,
+        datasetPath: row.dataset_path,
+        displayName: row.display_name,
+        totalImages: row.total_images,
+        typeId: row.type_id ?? null,
+        typeName: row.type_name || null,
+        duplicateRemovedCount: row.duplicate_removed_count ?? 0,
+        archivedAt: row.archived_at ? row.archived_at.toISOString() : null,
+        archivedBy: row.archived_by
+          ? { id: row.archived_by, username: row.archived_by_username }
+          : null,
+        archivedToPath: row.archived_to_path || null,
+        createdAt: row.created_at ? row.created_at.toISOString() : null,
+        totalEditedFiles: totalEdited,
+        totalDeletedImages: totalDeleted,
+        jobs,
+      };
+    });
   } finally {
     client.release();
   }

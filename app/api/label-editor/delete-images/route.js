@@ -3,8 +3,9 @@ import fs from 'fs';
 import path from 'path';
 import { withApiLogging } from '@/lib/api-logger';
 import { getUserFromRequest } from '@/lib/auth';
-import { getDatasetById, getDatasetByPath, getJobById, refreshDatasetImageStats } from '@/lib/db-datasets';
+import { getDatasetById, getDatasetByPath, getJobById, refreshDatasetImageStats, recordImageDeletion, deleteLabelFileHash } from '@/lib/db-datasets';
 import { buildJobEditorPaths, isJobImagePathAllowed, scanFolderImagePaths } from '@/lib/job-scope';
+import { emitDatasetUpdated, emitUserJobsUpdated } from '@/lib/live-update-events';
 import { canEditJob } from '@/lib/permissions';
 
 export const dynamic = 'force-dynamic';
@@ -25,10 +26,12 @@ export const POST = withApiLogging(async (req) => {
     let resolvedBasePath = basePath;
     let resolvedImages = images;
     let dataset = null;
+    let actor = null;
+    let resolvedJobId = jobId ? Number(jobId) : null;
 
     // Job-based mode: { jobId, imageNames } — filenames only, no basePath needed
     if (jobId && imageNames) {
-      const actor = await getUserFromRequest(req);
+      actor = await getUserFromRequest(req);
       if (!actor) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
       const job = await getJobById(Number(jobId));
       if (!job) return NextResponse.json({ error: 'Job not found' }, { status: 404 });
@@ -73,6 +76,14 @@ export const POST = withApiLogging(async (req) => {
         if (fs.existsSync(fullLabelPath)) fs.unlinkSync(fullLabelPath);
 
         deleted++;
+
+        // Record deletion for edit statistics (job-based mode only).
+        if (resolvedJobId && dataset?.id) {
+          const imageName = path.basename(imagePath);
+          const labelFilename = path.basename(labelPath);
+          await deleteLabelFileHash(dataset.id, resolvedJobId, labelFilename);
+          await recordImageDeletion(dataset.id, resolvedJobId, imageName, actor?.sub ? Number(actor.sub) : null);
+        }
       } catch (err) {
         errors.push({ path: imagePath, error: err.message });
       }
@@ -80,6 +91,11 @@ export const POST = withApiLogging(async (req) => {
 
     if (deleted > 0 && dataset?.id) {
       await refreshDatasetImageStats(dataset.id);
+      emitDatasetUpdated(dataset.id);
+      if (resolvedJobId) {
+        const job = await getJobById(resolvedJobId);
+        if (job?.assignedTo) emitUserJobsUpdated(job.assignedTo);
+      }
     }
 
     return NextResponse.json({ deleted, errors });

@@ -3,8 +3,10 @@ import fs from 'fs';
 import path from 'path';
 import { withApiLogging } from '@/lib/api-logger';
 import { getUserFromRequest } from '@/lib/auth';
-import { getDatasetById, getJobById } from '@/lib/db-datasets';
+import { getDatasetById, getJobById, getLabelFileHash, updateLabelFileHashes, upsertLabelFileHash } from '@/lib/db-datasets';
 import { buildJobEditorPaths, isJobLabelPathAllowed } from '@/lib/job-scope';
+import { emitDatasetUpdated, emitUserJobsUpdated } from '@/lib/live-update-events';
+import { hashLabelContent } from '@/lib/label-hash';
 import { canEditJob } from '@/lib/permissions';
 
 export const dynamic = 'force-dynamic';
@@ -35,8 +37,39 @@ export const POST = withApiLogging(async (req) => {
     }
 
     const fullLabelPath = path.join(dataset.datasetPath, relativeLabelPath);
+    const previousLabelContent = fs.existsSync(fullLabelPath)
+      ? fs.readFileSync(fullLabelPath, 'utf-8')
+      : '';
     fs.mkdirSync(path.dirname(fullLabelPath), { recursive: true });
-    fs.writeFileSync(fullLabelPath, content || '', 'utf-8');
+    const labelContent = content || '';
+
+    const labelFilename = path.basename(relativeLabelPath); // e.g. "frame_001.txt"
+    const existingHash = await getLabelFileHash(dataset.id, job.id, labelFilename);
+    if (
+      existingHash?.initialHash &&
+      existingHash.initialHash === existingHash.currentHash
+    ) {
+      const normalizedPreviousHash = hashLabelContent(previousLabelContent);
+      if (normalizedPreviousHash !== existingHash.initialHash) {
+        await updateLabelFileHashes(
+          dataset.id,
+          job.id,
+          labelFilename,
+          normalizedPreviousHash,
+          normalizedPreviousHash
+        );
+      }
+    }
+
+    fs.writeFileSync(fullLabelPath, labelContent, 'utf-8');
+
+    const currentHash = hashLabelContent(labelContent);
+    await upsertLabelFileHash(dataset.id, job.id, labelFilename, currentHash);
+
+    emitDatasetUpdated(dataset.id);
+    if (job.assignedTo) {
+      emitUserJobsUpdated(job.assignedTo);
+    }
 
     return NextResponse.json({ success: true });
   } catch (err) {

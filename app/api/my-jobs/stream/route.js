@@ -1,5 +1,7 @@
 import { getUserFromRequest } from '@/lib/auth';
 import { getMyJobs } from '@/lib/my-jobs';
+import { annotateJobsWithImageCount } from '@/lib/dataset-utils';
+import { subscribeUserJobsUpdates } from '@/lib/live-update-events';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -29,12 +31,14 @@ export async function GET(req) {
       let lastPayload = '';
       let pollTimer = null;
       let heartbeatTimer = null;
+      let unsubscribe = null;
 
       const close = () => {
         if (closed) return;
         closed = true;
         clearInterval(pollTimer);
         clearInterval(heartbeatTimer);
+        unsubscribe?.();
         try {
           controller.close();
         } catch {
@@ -45,7 +49,26 @@ export async function GET(req) {
       const pushJobs = async () => {
         if (closed) return;
         try {
-          const jobs = await getMyJobs(userId);
+          const raw = await getMyJobs(userId);
+
+          // Annotate with live image counts, grouping by dataset to minimise FS reads.
+          const byPath = new Map();
+          for (const job of raw) {
+            if (!byPath.has(job.datasetPath)) byPath.set(job.datasetPath, []);
+            byPath.get(job.datasetPath).push(job);
+          }
+          const annotated = [];
+          for (const [datasetPath, group] of byPath) {
+            try {
+              annotated.push(...annotateJobsWithImageCount(datasetPath, group));
+            } catch {
+              annotated.push(...group.map((j) => ({ ...j, currentImageCount: j.imageEnd - j.imageStart + 1 })));
+            }
+          }
+          const orderMap = new Map(raw.map((j, i) => [j.id, i]));
+          annotated.sort((a, b) => orderMap.get(a.id) - orderMap.get(b.id));
+
+          const jobs = annotated;
           const payload = JSON.stringify(jobs);
           if (payload !== lastPayload) {
             lastPayload = payload;
@@ -60,6 +83,10 @@ export async function GET(req) {
 
       controller.enqueue(encoder.encode('retry: 3000\n\n'));
       await pushJobs();
+
+      unsubscribe = subscribeUserJobsUpdates(userId, () => {
+        pushJobs();
+      });
 
       pollTimer = setInterval(pushJobs, POLL_INTERVAL_MS);
       heartbeatTimer = setInterval(() => {

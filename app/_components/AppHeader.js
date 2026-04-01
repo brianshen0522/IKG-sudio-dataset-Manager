@@ -74,6 +74,14 @@ export default function AppHeader({ title, backHref, backLabel }) {
         )}
         {isAdminOrDM && (
           <button
+            style={{ ...styles.navBtn, ...(pathname?.startsWith('/archive') ? styles.navBtnActive : {}) }}
+            onClick={() => router.push('/archive')}
+          >
+            Archive
+          </button>
+        )}
+        {isAdminOrDM && (
+          <button
             style={{ ...styles.navBtn, ...(pathname?.startsWith('/admin/tasks') ? styles.navBtnActive : {}) }}
             onClick={() => router.push('/admin/tasks')}
           >

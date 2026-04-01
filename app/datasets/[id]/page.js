@@ -20,6 +20,58 @@ const STATUS_LABEL = {
   labelled: 'Done',
 };
 
+function EditedImagesModal({ title, images, loading, error, canOpenEditor, renderMeta, onOpenOne, onOpenAll, onClose }) {
+  return (
+    <div style={styles.modalOverlay} onClick={onClose}>
+      <div style={{ ...styles.modal, maxWidth: '640px', width: '100%' }} onClick={(e) => e.stopPropagation()}>
+        <div style={styles.modalHeader}>
+          <h3 style={styles.modalTitle}>{title}</h3>
+          <button style={styles.closeBtn} onClick={onClose}>×</button>
+        </div>
+        {loading ? (
+          <p style={styles.modalMuted}>Loading edited images…</p>
+        ) : error ? (
+          <p style={styles.errorMsg}>{error}</p>
+        ) : images.length === 0 ? (
+          <p style={styles.modalMuted}>No edited images found.</p>
+        ) : (
+          <>
+            <div style={styles.editedList}>
+              {images.map((item) => (
+                <div key={item.labelFilename} style={styles.editedRow}>
+                  <div style={styles.editedInfo}>
+                    <span style={styles.editedName}>{item.imageName || item.labelFilename}</span>
+                    {renderMeta ? renderMeta(item) : null}
+                    {item.missingImage && <span style={styles.editedMeta}>Image file missing</span>}
+                  </div>
+                  {!item.missingImage && (
+                    <button
+                      style={canOpenEditor ? styles.openBtnSmall : styles.secondaryBtnSmall}
+                      onClick={() => onOpenOne(item.imageName)}
+                    >
+                      {canOpenEditor ? 'Open Editor' : 'Open Viewer'}
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+            <div style={styles.editedFooter}>
+              <button style={styles.cancelBtn} onClick={onClose}>Close</button>
+              <button
+                style={canOpenEditor ? styles.submitBtn : { ...styles.submitBtn, background: '#3a4f70' }}
+                onClick={onOpenAll}
+                disabled={!images.some((item) => item.imageName)}
+              >
+                {canOpenEditor ? 'Open All in Editor' : 'Open All in Viewer'}
+              </button>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function ReassignModal({ job, users, onClose, onDone }) {
   const [userId, setUserId] = useState('');
   const [keepData, setKeepData] = useState(true);
@@ -369,6 +421,7 @@ export default function DatasetDetailPage() {
   const [moveForceChecked, setMoveForceChecked] = useState(false);
   const [moveLoading, setMoveLoading] = useState(false);
   const [moveError, setMoveError] = useState('');
+  const [editedImagesModal, setEditedImagesModal] = useState(null);
 
   const isAdmin = user?.role === 'admin';
   const isDM = user?.role === 'data-manager';
@@ -402,6 +455,57 @@ export default function DatasetDetailPage() {
 
   function openJobEditor(jobId) {
     openInNewTab(`/label-editor?jobId=${jobId}`);
+  }
+
+  function canOpenEditedInEditor(job) {
+    return String(job?.assignedTo) === String(user?.id) && (job?.status === 'unlabelled' || job?.status === 'labeling');
+  }
+
+  function openEditedSubset(job, imageNames) {
+    const names = (imageNames || []).filter(Boolean);
+    if (names.length === 0) return;
+
+    const params = new URLSearchParams({
+      jobId: String(job.id),
+      edited: '1',
+    });
+    params.set('start', names[0]);
+
+    if (canOpenEditedInEditor(job)) {
+      openInNewTab(`/label-editor?${params.toString()}`);
+    } else {
+      openInNewTab(`/viewer?${params.toString()}`);
+    }
+  }
+
+  async function showEditedImages(job) {
+    setEditedImagesModal({ job, images: [], loading: true, error: '' });
+    try {
+      const res = await fetch(`/api/datasets/${id}/jobs/${job.id}/edited-images`);
+      const data = await res.json();
+      if (!res.ok) {
+        setEditedImagesModal({ job, images: [], loading: false, error: data.error || 'Failed to load edited images' });
+        return;
+      }
+      setEditedImagesModal({ job, images: Array.isArray(data.images) ? data.images : [], loading: false, error: '' });
+    } catch {
+      setEditedImagesModal({ job, images: [], loading: false, error: 'Network error' });
+    }
+  }
+
+  async function showDatasetEditedImages() {
+    setEditedImagesModal({ datasetMode: true, images: [], loading: true, error: '' });
+    try {
+      const res = await fetch(`/api/datasets/${id}/edited-images`);
+      const data = await res.json();
+      if (!res.ok) {
+        setEditedImagesModal({ datasetMode: true, images: [], loading: false, error: data.error || 'Failed to load edited images' });
+        return;
+      }
+      setEditedImagesModal({ datasetMode: true, images: Array.isArray(data.images) ? data.images : [], loading: false, error: '' });
+    } catch {
+      setEditedImagesModal({ datasetMode: true, images: [], loading: false, error: 'Network error' });
+    }
   }
 
   const loadData = useCallback(async () => {
@@ -677,6 +781,22 @@ export default function DatasetDetailPage() {
                 );
               })}
             </div>
+            <div style={styles.editStatsRow}>
+              <span style={styles.editStatItem}>
+                <span style={styles.editStatLabel}>Files edited</span>
+                {(dataset.totalEditedFiles ?? 0) > 0 ? (
+                  <button type="button" style={styles.editStatButton} onClick={showDatasetEditedImages}>
+                    <span style={styles.editStatValue}>{dataset.totalEditedFiles ?? 0}</span>
+                  </button>
+                ) : (
+                  <span style={styles.editStatValue}>{dataset.totalEditedFiles ?? 0}</span>
+                )}
+              </span>
+              <span style={styles.editStatItem}>
+                <span style={styles.editStatLabel}>Images deleted</span>
+                <span style={styles.editStatValue}>{dataset.totalDeletedImages ?? 0}</span>
+              </span>
+            </div>
           </div>
         )}
 
@@ -695,124 +815,124 @@ export default function DatasetDetailPage() {
             </div>
           )}
         </div>
-        <div style={styles.table}>
-          {(() => {
-            const cols = isAdminOrDM ? '36px 60px 160px 130px 1fr 1fr' : '60px 160px 130px 1fr';
-            const gridStyle = { gridTemplateColumns: cols };
-            return (
-              <>
-                <div style={{ ...styles.tableHead, ...gridStyle }}>
-                  {isAdminOrDM && (
-                    <span style={styles.thCheck}>
-                      {unassignedJobs.length > 0 && (
-                        <input
-                          type="checkbox"
-                          checked={allUnassignedSelected}
-                          onChange={toggleSelectAll}
-                          style={styles.checkbox}
-                          title="Select all unassigned"
-                        />
-                      )}
-                    </span>
-                  )}
-                  <span style={styles.thJob}>Job</span>
-                  <span style={styles.thRange}>Image Range</span>
-                  <span style={styles.thStatus}>Status</span>
-                  {isAdminOrDM && <span style={styles.thAssigned}>Assigned To</span>}
-                  <span style={styles.thActions}>Actions</span>
-                </div>
-                {jobs.map((job) => {
-                  const busy = actionLoading === job.id;
-                  const isMoving = ['pending', 'moving', 'verifying'].includes(dataset?.moveStatus);
-                  const isMyJob = String(job.assignedTo) === String(user?.id);
-                  return (
-                    <div key={job.id} style={{ ...styles.tableRow, ...gridStyle }}>
-                      {isAdminOrDM && (
-                        <span style={styles.tdCheck}>
-                          {job.status === 'unassigned' && (
-                            <input
-                              type="checkbox"
-                              checked={selectedIds.has(job.id)}
-                              onChange={() => toggleSelect(job.id)}
-                              style={styles.checkbox}
-                            />
-                          )}
-                        </span>
-                      )}
-                      <span style={styles.tdJob}>#{job.jobIndex}</span>
-                      <span style={styles.tdRange}>
-                        {job.imageStart}–{job.imageEnd}
-                        <small style={styles.tdRangeSub}> ({job.currentImageCount ?? (job.imageEnd - job.imageStart + 1)} imgs)</small>
+        <div style={styles.tableWrap}>
+          <table style={styles.table}>
+            <thead>
+              <tr>
+                {isAdminOrDM && (
+                  <th style={{ ...styles.th, width: 32 }}>
+                    {unassignedJobs.length > 0 && (
+                      <input type="checkbox" checked={allUnassignedSelected} onChange={toggleSelectAll} style={styles.checkbox} title="Select all unassigned" />
+                    )}
+                  </th>
+                )}
+                <th style={{ ...styles.th, width: 60 }}>Job</th>
+                <th style={styles.th}>Image Range</th>
+                <th style={{ ...styles.th, width: 130 }}>Status</th>
+                {isAdminOrDM && <th style={styles.th}>Assigned To</th>}
+                <th style={{ ...styles.th, ...styles.thNum }}>Edited</th>
+                <th style={{ ...styles.th, ...styles.thNum }}>Deleted</th>
+                <th style={styles.th}>Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {jobs.map((job) => {
+                const busy = actionLoading === job.id;
+                const isMoving = ['pending', 'moving', 'verifying'].includes(dataset?.moveStatus);
+                const isMyJob = String(job.assignedTo) === String(user?.id);
+                return (
+                  <tr key={job.id} style={styles.tr}>
+                    {isAdminOrDM && (
+                      <td style={styles.td}>
+                        {job.status === 'unassigned' && (
+                          <input type="checkbox" checked={selectedIds.has(job.id)} onChange={() => toggleSelect(job.id)} style={styles.checkbox} />
+                        )}
+                      </td>
+                    )}
+                    <td style={{ ...styles.td, ...styles.tdJob }}>#{job.jobIndex}</td>
+                    <td style={{ ...styles.td, ...styles.tdRange }}>
+                      {job.imageStart}–{job.imageEnd}
+                      <small style={styles.tdRangeSub}> ({job.currentImageCount ?? (job.imageEnd - job.imageStart + 1)} imgs)</small>
+                    </td>
+                    <td style={styles.td}>
+                      <span style={{ ...styles.statusBadge, background: STATUS_COLOR[job.status] + '22', color: STATUS_COLOR[job.status] }}>
+                        {STATUS_LABEL[job.status]}
                       </span>
-                      <span style={styles.tdStatus}>
-                        <span style={{ ...styles.statusBadge, background: STATUS_COLOR[job.status] + '22', color: STATUS_COLOR[job.status] }}>
-                          {STATUS_LABEL[job.status]}
-                        </span>
-                      </span>
-                      {isAdminOrDM && (
-                        <span style={styles.tdAssigned}>
-                          {job.assignedToUsername || <em style={{ color: '#5a6a8a' }}>—</em>}
-                        </span>
-                      )}
-                      <span style={styles.tdActions}>
-                        {/* Admin/DM actions */}
-                        {isAdminOrDM && (
-                          <button style={styles.secondaryBtnSmall} disabled={busy}
-                            onClick={() => openJobViewer(job.id)}>Viewer</button>
-                        )}
-                        {isAdminOrDM && job.status === 'unassigned' && (
-                          <button style={styles.actionBtn} disabled={busy || isMoving}
-                            onClick={() => setAssignModal(job)}>Assign</button>
-                        )}
-                        {isAdminOrDM && job.status !== 'unassigned' && (
-                          <button style={styles.actionBtn} disabled={busy || isMoving}
-                            onClick={() => setReassignModal(job)}>Reassign</button>
-                        )}
-                        {isAdminOrDM && job.status !== 'unassigned' && (
-                          <button style={{ ...styles.actionBtn, ...styles.actionBtnDanger }} disabled={busy || isMoving}
-                            onClick={() => jobAction(job.id, 'unassign')}>Unassign</button>
-                        )}
-                        {isAdminOrDM && (job.status === 'unlabelled' || job.status === 'labeling') && (
-                          <button style={{ ...styles.actionBtn, ...styles.actionBtnDanger }} disabled={busy || isMoving}
-                            onClick={() => jobAction(job.id, 'reset', { keepData: true })}>Reset</button>
-                        )}
-                        {isAdminOrDM && job.status === 'labelled' && (
-                          <button style={{ ...styles.actionBtn, ...styles.actionBtnDanger }} disabled={busy || isMoving}
-                            onClick={() => jobAction(job.id, 'reset', { keepData: false })}>Reopen</button>
-                        )}
-                        {/* User actions */}
-                        {!isAdminOrDM && job.status === 'unassigned' && (
-                          <button style={styles.actionBtn} disabled={busy || isMoving}
-                            onClick={() => jobAction(job.id, 'assign')}>Self-Assign</button>
-                        )}
-                        {!isAdminOrDM && isMyJob && job.status === 'unlabelled' && (
-                          <button style={styles.openBtn} disabled={busy || isMoving}
-                            onClick={() => openJobEditor(job.id)}>Start Labeling</button>
-                        )}
-                        {!isAdminOrDM && isMyJob && job.status === 'labeling' && (
-                          <button style={styles.openBtn} disabled={busy || isMoving}
-                            onClick={() => openJobEditor(job.id)}>Continue</button>
-                        )}
-                        {!isAdminOrDM && isMyJob && (job.status === 'unlabelled' || job.status === 'labeling') && (
-                          <button
-                            style={{ ...styles.actionBtn, borderColor: '#20c25a44', color: '#20c25a' }}
-                            disabled={busy || isMoving}
-                            onClick={() => setMarkDoneConfirm(job.id)}
-                          >
-                            Mark Done
+                    </td>
+                    {isAdminOrDM && (
+                      <td style={{ ...styles.td, ...styles.tdAssigned }}>
+                        {job.assignedToUsername || <em style={{ color: '#5a6a8a' }}>—</em>}
+                      </td>
+                    )}
+                    <td style={{ ...styles.td, ...styles.tdNum }}>
+                      {job.editedFiles > 0
+                        ? (
+                          <button type="button" style={styles.statButton} onClick={() => showEditedImages(job)} title="Show edited images">
+                            <span style={styles.statEdited}>{job.editedFiles}</span>
                           </button>
-                        )}
-                        {!isAdminOrDM && isMyJob && job.status !== 'labelled' && (
-                          <button style={{ ...styles.actionBtn, ...styles.actionBtnDanger }} disabled={busy || isMoving}
-                            onClick={() => jobAction(job.id, 'unassign')}>Unassign</button>
-                        )}
-                      </span>
-                    </div>
-                  );
-                })}
-              </>
-            );
-          })()}
+                        )
+                        : <span style={styles.statZero}>0</span>}
+                    </td>
+                    <td style={{ ...styles.td, ...styles.tdNum }}>
+                      {job.deletedImages > 0
+                        ? <span style={styles.statDeleted}>{job.deletedImages}</span>
+                        : <span style={styles.statZero}>0</span>}
+                    </td>
+                    <td style={{ ...styles.td, ...styles.tdActions }}>
+                      {/* Admin/DM actions */}
+                      {isAdminOrDM && (
+                        <button style={styles.secondaryBtnSmall} disabled={busy}
+                          onClick={() => openJobViewer(job.id)}>Viewer</button>
+                      )}
+                      {isAdminOrDM && job.status === 'unassigned' && (
+                        <button style={styles.actionBtn} disabled={busy || isMoving}
+                          onClick={() => setAssignModal(job)}>Assign</button>
+                      )}
+                      {isAdminOrDM && job.status !== 'unassigned' && (
+                        <button style={styles.actionBtn} disabled={busy || isMoving}
+                          onClick={() => setReassignModal(job)}>Reassign</button>
+                      )}
+                      {isAdminOrDM && job.status !== 'unassigned' && (
+                        <button style={{ ...styles.actionBtn, ...styles.actionBtnDanger }} disabled={busy || isMoving}
+                          onClick={() => jobAction(job.id, 'unassign')}>Unassign</button>
+                      )}
+                      {isAdminOrDM && (job.status === 'unlabelled' || job.status === 'labeling') && (
+                        <button style={{ ...styles.actionBtn, ...styles.actionBtnDanger }} disabled={busy || isMoving}
+                          onClick={() => jobAction(job.id, 'reset', { keepData: true })}>Reset</button>
+                      )}
+                      {isAdminOrDM && job.status === 'labelled' && (
+                        <button style={{ ...styles.actionBtn, ...styles.actionBtnDanger }} disabled={busy || isMoving}
+                          onClick={() => jobAction(job.id, 'reset', { keepData: false })}>Reopen</button>
+                      )}
+                      {/* User actions */}
+                      {!isAdminOrDM && job.status === 'unassigned' && (
+                        <button style={styles.actionBtn} disabled={busy || isMoving}
+                          onClick={() => jobAction(job.id, 'assign')}>Self-Assign</button>
+                      )}
+                      {!isAdminOrDM && isMyJob && job.status === 'unlabelled' && (
+                        <button style={styles.openBtn} disabled={busy || isMoving}
+                          onClick={() => openJobEditor(job.id)}>Start Labeling</button>
+                      )}
+                      {!isAdminOrDM && isMyJob && job.status === 'labeling' && (
+                        <button style={styles.openBtn} disabled={busy || isMoving}
+                          onClick={() => openJobEditor(job.id)}>Continue</button>
+                      )}
+                      {!isAdminOrDM && isMyJob && (job.status === 'unlabelled' || job.status === 'labeling') && (
+                        <button style={{ ...styles.actionBtn, borderColor: '#20c25a44', color: '#20c25a' }}
+                          disabled={busy || isMoving} onClick={() => setMarkDoneConfirm(job.id)}>
+                          Mark Done
+                        </button>
+                      )}
+                      {!isAdminOrDM && isMyJob && job.status !== 'labelled' && (
+                        <button style={{ ...styles.actionBtn, ...styles.actionBtnDanger }} disabled={busy || isMoving}
+                          onClick={() => jobAction(job.id, 'unassign')}>Unassign</button>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
         </div>
       </main>
 
@@ -946,6 +1066,32 @@ export default function DatasetDetailPage() {
           </div>
         </div>
       )}
+      {editedImagesModal && (
+        <EditedImagesModal
+          title={editedImagesModal.datasetMode ? 'Edited Images in Dataset' : `Edited Images for Job #${editedImagesModal.job?.jobIndex}`}
+          images={editedImagesModal.images}
+          loading={editedImagesModal.loading}
+          error={editedImagesModal.error}
+          canOpenEditor={!editedImagesModal.datasetMode && canOpenEditedInEditor(editedImagesModal.job)}
+          renderMeta={editedImagesModal.datasetMode ? ((item) => <span style={styles.editedMeta}>Job #{item.jobIndex}</span>) : null}
+          onOpenOne={(imageName) => {
+            if (editedImagesModal.datasetMode) {
+              const item = editedImagesModal.images.find((entry) => entry.imageName === imageName);
+              if (item) openInNewTab(`/viewer?jobId=${item.jobId}&edited=1&start=${encodeURIComponent(imageName)}`);
+              return;
+            }
+            openEditedSubset(editedImagesModal.job, [imageName]);
+          }}
+          onOpenAll={() => {
+            if (editedImagesModal.datasetMode) {
+              openInNewTab(`/viewer?datasetId=${encodeURIComponent(dataset.id)}&edited=1`);
+              return;
+            }
+            openEditedSubset(editedImagesModal.job, editedImagesModal.images.map((item) => item.imageName));
+          }}
+          onClose={() => setEditedImagesModal(null)}
+        />
+      )}
     </div>
   );
 }
@@ -991,33 +1137,38 @@ const styles = {
   progressPct: { fontSize: '14px', fontWeight: 700, color: '#e6edf7', minWidth: '36px', textAlign: 'right' },
   progressLegend: { display: 'flex', flexWrap: 'wrap', gap: '12px' },
   legendItem: { fontSize: '12px' },
-  table: { background: '#152033', border: '1px solid #25344d', borderRadius: '10px', overflow: 'hidden' },
-  tableHead: {
-    display: 'grid',
-    gridTemplateColumns: '60px 160px 130px 1fr 1fr',
-    padding: '10px 16px',
-    background: '#1b2940',
-    borderBottom: '1px solid #25344d',
+  editStatsRow: { display: 'flex', gap: '20px', paddingTop: '4px', borderTop: '1px solid #1e3050' },
+  editStatItem: { display: 'flex', alignItems: 'center', gap: '6px' },
+  editStatLabel: { fontSize: '12px', color: '#6a7f9a' },
+  editStatValue: { fontSize: '13px', fontWeight: 700, color: '#e6edf7' },
+  editStatButton: { background: 'transparent', border: 'none', cursor: 'pointer', padding: 0, font: 'inherit' },
+  modalMuted: { color: '#9ba9c3', marginBottom: '18px', fontSize: '14px' },
+  tableWrap: { background: '#152033', border: '1px solid #25344d', borderRadius: '10px', overflow: 'hidden' },
+  table: { width: '100%', borderCollapse: 'collapse', fontSize: '13px' },
+  th: {
+    padding: '10px 14px', textAlign: 'left', whiteSpace: 'nowrap',
+    background: '#1b2940', borderBottom: '1px solid #25344d',
     fontSize: '11px', fontWeight: 700, color: '#9ba9c3', textTransform: 'uppercase', letterSpacing: '0.5px',
   },
-  tableHeadNoAssigned: {
-    gridTemplateColumns: '60px 160px 130px 1fr',
-  },
-  tableRow: {
-    display: 'grid',
-    gridTemplateColumns: '60px 160px 130px 1fr 1fr',
-    padding: '12px 16px',
-    borderBottom: '1px solid #1b2940',
-    alignItems: 'center',
-    fontSize: '13px',
-  },
-  thJob: {}, thRange: {}, thStatus: {}, thAssigned: {}, thActions: {},
-  tdJob: { fontWeight: 700, color: '#e6edf7' },
-  tdRange: { color: '#9ba9c3', fontFamily: 'monospace', fontSize: '12px' },
+  thNum: { textAlign: 'right' },
+  tr: { borderBottom: '1px solid #1b2940' },
+  td: { padding: '11px 14px', verticalAlign: 'middle' },
+  tdJob: { fontWeight: 700, color: '#e6edf7', whiteSpace: 'nowrap' },
+  tdRange: { color: '#9ba9c3', fontFamily: 'monospace', fontSize: '12px', whiteSpace: 'nowrap' },
   tdRangeSub: { color: '#5a6a8a' },
-  tdStatus: {},
-  tdAssigned: { color: '#e6edf7', fontSize: '13px' },
+  tdAssigned: { color: '#e6edf7' },
   tdActions: { display: 'flex', flexWrap: 'wrap', gap: '6px', alignItems: 'center' },
+  tdNum: { textAlign: 'right', fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' },
+  statButton: { background: 'transparent', border: 'none', cursor: 'pointer', padding: 0, font: 'inherit' },
+  statEdited:  { color: '#f1b11a', fontWeight: 700 },
+  statDeleted: { color: '#d24343', fontWeight: 700 },
+  statZero:    { color: '#3a4f70' },
+  editedList: { display: 'flex', flexDirection: 'column', gap: '8px', maxHeight: '50vh', overflowY: 'auto', marginBottom: '18px' },
+  editedRow: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', padding: '10px 12px', background: '#152033', border: '1px solid #25344d', borderRadius: '8px' },
+  editedInfo: { display: 'flex', flexDirection: 'column', gap: '4px', minWidth: 0 },
+  editedName: { color: '#e6edf7', fontSize: '13px', fontWeight: 600, fontFamily: 'monospace', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+  editedMeta: { color: '#9ba9c3', fontSize: '11px' },
+  editedFooter: { display: 'flex', justifyContent: 'flex-end', gap: '10px' },
   statusBadge: { fontSize: '11px', fontWeight: 700, padding: '3px 8px', borderRadius: '20px' },
   actionBtn: {
     background: 'transparent', border: '1px solid #25344d', borderRadius: '5px',

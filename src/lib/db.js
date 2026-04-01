@@ -182,6 +182,51 @@ export async function initDatabase() {
       ALTER TABLE datasets ADD COLUMN IF NOT EXISTS move_attempt INTEGER NOT NULL DEFAULT 0;
     `);
 
+    // ---- Migrate: archive + duplicate count columns on datasets ----
+    await client.query(`
+      ALTER TABLE datasets ADD COLUMN IF NOT EXISTS archived_at             TIMESTAMP DEFAULT NULL;
+      ALTER TABLE datasets ADD COLUMN IF NOT EXISTS archived_by             INTEGER REFERENCES users(id) ON DELETE SET NULL;
+      ALTER TABLE datasets ADD COLUMN IF NOT EXISTS archived_to_path        TEXT DEFAULT NULL;
+      ALTER TABLE datasets ADD COLUMN IF NOT EXISTS duplicate_removed_count INTEGER NOT NULL DEFAULT 0;
+    `);
+
+    // ---- Label file hashes (per-file baseline + current hash for edit tracking) ----
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS label_file_hashes (
+        id           SERIAL PRIMARY KEY,
+        dataset_id   INTEGER NOT NULL REFERENCES datasets(id) ON DELETE CASCADE,
+        job_id       INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+        filename     TEXT NOT NULL,
+        initial_hash TEXT,
+        current_hash TEXT NOT NULL,
+        updated_at   TIMESTAMP DEFAULT NOW(),
+        UNIQUE(job_id, filename)
+      );
+    `);
+    await client.query(`
+      ALTER TABLE label_file_hashes ALTER COLUMN initial_hash DROP NOT NULL;
+    `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_label_file_hashes_dataset ON label_file_hashes(dataset_id);
+      CREATE INDEX IF NOT EXISTS idx_label_file_hashes_job     ON label_file_hashes(job_id);
+    `);
+
+    // ---- Deleted images (tracks image deletions made in label-editor / viewer) ----
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS deleted_images (
+        id         SERIAL PRIMARY KEY,
+        dataset_id INTEGER NOT NULL REFERENCES datasets(id) ON DELETE CASCADE,
+        job_id     INTEGER REFERENCES jobs(id) ON DELETE SET NULL,
+        image_name TEXT NOT NULL,
+        deleted_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        deleted_at TIMESTAMP DEFAULT NOW()
+      );
+    `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_deleted_images_dataset ON deleted_images(dataset_id);
+      CREATE INDEX IF NOT EXISTS idx_deleted_images_job     ON deleted_images(job_id);
+    `);
+
     // ---- User preferences (shortcuts, etc.) ----
     await client.query(`
       CREATE TABLE IF NOT EXISTS user_preferences (

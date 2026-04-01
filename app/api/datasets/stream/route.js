@@ -1,5 +1,6 @@
 import { getUserFromRequest } from '@/lib/auth';
 import { getAllDatasets, getJobsByDataset } from '@/lib/db-datasets';
+import { subscribeDatasetsUpdates } from '@/lib/live-update-events';
 import { isAdminOrDM } from '@/lib/permissions';
 
 export const dynamic = 'force-dynamic';
@@ -45,12 +46,14 @@ export async function GET(req) {
       let lastPayload = '';
       let pollTimer = null;
       let heartbeatTimer = null;
+      let unsubscribe = null;
 
       const close = () => {
         if (closed) return;
         closed = true;
         clearInterval(pollTimer);
         clearInterval(heartbeatTimer);
+        unsubscribe?.();
         try {
           controller.close();
         } catch {}
@@ -74,6 +77,10 @@ export async function GET(req) {
 
       controller.enqueue(encoder.encode('retry: 3000\n\n'));
       await pushPayload();
+
+      unsubscribe = subscribeDatasetsUpdates(() => {
+        pushPayload();
+      });
 
       pollTimer = setInterval(pushPayload, POLL_INTERVAL_MS);
       heartbeatTimer = setInterval(() => {

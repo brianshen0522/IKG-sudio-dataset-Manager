@@ -3,7 +3,7 @@ import path from 'path';
 import { NextResponse } from 'next/server';
 import { withApiLogging } from '@/lib/api-logger';
 import { getUserFromRequest } from '@/lib/auth';
-import { getDatasetById, deleteDataset, updateDatasetFields } from '@/lib/db-datasets';
+import { getDatasetById, deleteDataset, updateDatasetFields, getJobEditStats } from '@/lib/db-datasets';
 import { canDeleteDataset, canUpdateDataset, canViewAll } from '@/lib/permissions';
 import { getPool } from '@/lib/db';
 
@@ -36,6 +36,18 @@ export const GET = withApiLogging(async function handler(req, { params }) {
   } catch {
     dataset.hasDuplicateFolder = false;
   }
+
+  // Aggregate edit stats across all jobs for this dataset.
+  const editStats = await getJobEditStats(id);
+  let totalEditedFiles = 0;
+  let totalDeletedImages = 0;
+  for (const s of editStats.values()) {
+    totalEditedFiles  += s.editedFiles;
+    totalDeletedImages += s.deletedImages;
+  }
+  dataset.totalEditedFiles  = totalEditedFiles;
+  dataset.totalDeletedImages = totalDeletedImages;
+
   return NextResponse.json({ dataset });
 });
 

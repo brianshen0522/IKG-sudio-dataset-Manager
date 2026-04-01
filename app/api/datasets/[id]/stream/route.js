@@ -1,8 +1,9 @@
 import fs from 'fs';
 import path from 'path';
 import { getUserFromRequest } from '@/lib/auth';
-import { getDatasetById, getJobsByDataset } from '@/lib/db-datasets';
+import { getDatasetById, getJobsByDataset, getJobEditStats } from '@/lib/db-datasets';
 import { annotateJobsWithImageCount } from '@/lib/dataset-utils';
+import { subscribeDatasetUpdates } from '@/lib/live-update-events';
 import { canViewAll } from '@/lib/permissions';
 import { getPool } from '@/lib/db';
 
@@ -53,12 +54,14 @@ export async function GET(req, { params }) {
       let deletedSent = false;
       let pollTimer = null;
       let heartbeatTimer = null;
+      let unsubscribe = null;
 
       const close = () => {
         if (closed) return;
         closed = true;
         clearInterval(pollTimer);
         clearInterval(heartbeatTimer);
+        unsubscribe?.();
         try {
           controller.close();
         } catch {}
@@ -84,11 +87,25 @@ export async function GET(req, { params }) {
             return;
           }
 
-          const rawJobs = await getJobsByDataset(datasetId, {
-            role: actor.role,
-            userId: Number(actor.sub)
+          const [rawJobs, editStats] = await Promise.all([
+            getJobsByDataset(datasetId, { role: actor.role, userId: Number(actor.sub) }),
+            getJobEditStats(datasetId),
+          ]);
+
+          const jobs = annotateJobsWithImageCount(dataset.datasetPath, rawJobs).map((job) => {
+            const s = editStats.get(job.id) ?? { editedFiles: 0, deletedImages: 0 };
+            return { ...job, editedFiles: s.editedFiles, deletedImages: s.deletedImages };
           });
-          const jobs = annotateJobsWithImageCount(dataset.datasetPath, rawJobs);
+
+          // Compute dataset-level totals from job stats.
+          let totalEditedFiles = 0;
+          let totalDeletedImages = 0;
+          for (const s of editStats.values()) {
+            totalEditedFiles   += s.editedFiles;
+            totalDeletedImages += s.deletedImages;
+          }
+          dataset.totalEditedFiles   = totalEditedFiles;
+          dataset.totalDeletedImages = totalDeletedImages;
 
           const dupImagesDir = path.join(dataset.datasetPath, 'duplicate', 'images');
           try {
@@ -114,6 +131,10 @@ export async function GET(req, { params }) {
       await pushPayload();
 
       if (closed) return;
+
+      unsubscribe = subscribeDatasetUpdates(datasetId, () => {
+        pushPayload();
+      });
 
       pollTimer = setInterval(pushPayload, POLL_INTERVAL_MS);
       heartbeatTimer = setInterval(() => {

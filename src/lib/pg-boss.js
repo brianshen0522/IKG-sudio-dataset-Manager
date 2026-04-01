@@ -45,7 +45,11 @@ export async function ensureBossStarted() {
     const { runMoveDataset } = await import('./move-dataset-worker.js');
     await boss.work('move-dataset-to-check', runMoveDataset);
 
-    console.log('[pg-boss] started — workers registered for duplicate-scan and move-dataset-to-check');
+    await boss.createQueue('hash-baseline');
+    const { runHashBaseline } = await import('./hash-baseline-worker.js');
+    await boss.work('hash-baseline', runHashBaseline);
+
+    console.log('[pg-boss] started — workers registered for duplicate-scan, move-dataset-to-check, hash-baseline');
     return boss;
   })().catch((err) => {
     globalThis[START_KEY] = null;

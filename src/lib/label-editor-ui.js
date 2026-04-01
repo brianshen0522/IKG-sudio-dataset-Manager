@@ -164,6 +164,7 @@ function shortcutMatch(e, actionId) {
         const jobIdParam = urlParams.get('jobId') || '';
         const viewParam = urlParams.get('view') || '';
         const classFileParam = urlParams.get('classFile') || '';
+        const editedOnlyParam = urlParams.get('edited') === '1';
         let startImageParam = urlParams.get('start');
         let lastKnownImageParam = startImageParam || '';
 
@@ -239,6 +240,26 @@ function shortcutMatch(e, actionId) {
             filterBaseList = [...allImageList];
             preloadedImages.clear();
             preloadedLabels.clear();
+        }
+
+        async function applyEditedOnlyFilter() {
+            if (!editedOnlyParam || !currentJobId || !currentDatasetId) {
+                return;
+            }
+            try {
+                const res = await fetch(`/api/datasets/${encodeURIComponent(currentDatasetId)}/jobs/${encodeURIComponent(currentJobId)}/edited-images`);
+                if (!res.ok) return;
+                const data = await res.json();
+                const editedSet = new Set((data.images || []).map((item) => item.imageName).filter(Boolean));
+                allImageList = allImageList.filter((p) => editedSet.has(p) || editedSet.has(p.split('/').pop()));
+                imageList = imageList.filter((p) => editedSet.has(p) || editedSet.has(p.split('/').pop()));
+                filterBaseList = filterBaseList.filter((p) => editedSet.has(p) || editedSet.has(p.split('/').pop()));
+                imageMetaByPath = Object.fromEntries(
+                    Object.entries(imageMetaByPath || {}).filter(([p]) => editedSet.has(p) || editedSet.has(p.split('/').pop()))
+                );
+            } catch (err) {
+                console.warn('Failed to apply edited-only filter:', err);
+            }
         }
 
         function applyLabelEditorPreloadCount(value) {
@@ -400,6 +421,8 @@ function shortcutMatch(e, actionId) {
                 const loaded = await loadImagesFromFolder();
                 if (!loaded) return;
             }
+
+            await applyEditedOnlyFilter();
 
             if (imageList.length === 0) {
                 showError(t('editor.status.missingImagePath'));

@@ -3,7 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import { getPool, ensureInitialized } from './db.js';
 import { computeMetadataHashWithCount } from './dataset-hash.js';
-import { updateDatasetMoveStatus } from './db-datasets.js';
+import { updateDatasetMoveStatus, archiveDataset } from './db-datasets.js';
 import { appendTaskLog } from './db-tasks.js';
 
 async function log(jobId, level, message) {
@@ -56,7 +56,7 @@ export async function runMoveDataset(job) {
   await ensureInitialized();
   const j = Array.isArray(job) ? job[0] : job;
   const jobId = j?.id;           // pg-boss UUID used as task_logs.job_id
-  const { datasetId, datasetPath, checkPath, subdirName } = j?.data ?? {};
+  const { datasetId, datasetPath, checkPath, subdirName, movedBy } = j?.data ?? {};
   const destPath = path.join(checkPath, subdirName);
   const pool = getPool();
 
@@ -106,9 +106,9 @@ export async function runMoveDataset(job) {
     await fs.promises.rm(datasetPath, { recursive: true, force: true });
     await log(jobId, 'info', 'Source directory removed.');
 
-    // --- Delete DB record ---
-    await pool.query('DELETE FROM datasets WHERE id = $1', [datasetId]);
-    await log(jobId, 'info', `Dataset #${datasetId} removed from database.`);
+    // --- Archive DB record (keep for history — do not delete) ---
+    await archiveDataset(datasetId, movedBy ?? null, destPath);
+    await log(jobId, 'info', `Dataset #${datasetId} archived in database (moved by user #${movedBy ?? 'unknown'}).`);
     await log(jobId, 'info', `Move complete. Dataset is now at: ${destPath}`);
 
   } catch (err) {

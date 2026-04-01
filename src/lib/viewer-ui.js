@@ -49,6 +49,8 @@ let labelCache = {};      // imgPath -> { classes: number[], count: number }
 let labelRaw = {};        // imgPath -> raw label string
 let thumbCache = {};      // imgPath -> blob URL
 let selectedImages = new Set();
+let requestedImages = null;
+let editedOnly = false;
 let filterState = {
   name: '',
   classMode: 'any',
@@ -104,6 +106,11 @@ export async function initViewer() {
   basePath = params.get('base') || '';
   folder = params.get('folder') || 'images';
   currentClassFile = params.get('classFile') || '';
+  const requestedImagesParam = params.get('images') || '';
+  requestedImages = requestedImagesParam
+    ? requestedImagesParam.split(',').map((img) => img.trim()).filter(Boolean)
+    : null;
+  editedOnly = params.get('edited') === '1';
 
   buildShell();
   await loadViewerRuntimeConfig();
@@ -270,6 +277,39 @@ async function loadData() {
     const listData = await listRes.json();
     allImageList = listData.images || [];
     imageMetaByPath = listData.imageMeta || {};
+  }
+  if (editedOnly && currentJobId) {
+    try {
+      const res = await fetch(`${API_BASE}/api/datasets/${encodeURIComponent(currentDatasetId)}/jobs/${encodeURIComponent(currentJobId)}/edited-images`);
+      if (res.ok) {
+        const data = await res.json();
+        const editedSet = new Set((data.images || []).map((item) => item.imageName).filter(Boolean));
+        allImageList = allImageList.filter((p) => editedSet.has(p) || editedSet.has(p.split('/').pop()));
+        imageMetaByPath = Object.fromEntries(
+          Object.entries(imageMetaByPath).filter(([p]) => editedSet.has(p) || editedSet.has(p.split('/').pop()))
+        );
+      }
+    } catch {}
+  }
+  if (editedOnly && !currentJobId && currentDatasetId) {
+    try {
+      const res = await fetch(`${API_BASE}/api/datasets/${encodeURIComponent(currentDatasetId)}/edited-images`);
+      if (res.ok) {
+        const data = await res.json();
+        const editedSet = new Set((data.images || []).map((item) => item.imageName).filter(Boolean));
+        allImageList = allImageList.filter((p) => editedSet.has(p) || editedSet.has(p.split('/').pop()));
+        imageMetaByPath = Object.fromEntries(
+          Object.entries(imageMetaByPath).filter(([p]) => editedSet.has(p) || editedSet.has(p.split('/').pop()))
+        );
+      }
+    } catch {}
+  }
+  if (requestedImages && requestedImages.length > 0) {
+    const requestedSet = new Set(requestedImages);
+    allImageList = allImageList.filter((p) => requestedSet.has(p) || requestedSet.has(p.split('/').pop()));
+    imageMetaByPath = Object.fromEntries(
+      Object.entries(imageMetaByPath).filter(([p]) => requestedSet.has(p) || requestedSet.has(p.split('/').pop()))
+    );
   }
   updateHeaderCount(allImageList.length);
 

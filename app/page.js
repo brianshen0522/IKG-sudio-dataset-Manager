@@ -35,6 +35,50 @@ const STATUS_LABEL = {
   labelled: 'Done',
 };
 
+function EditedImagesModal({ job, images, loading, error, openOneLabel = 'Open Editor', openAllLabel = 'Open All in Editor', onOpenOne, onOpenAll, onClose }) {
+  return (
+    <div style={styles.modalOverlay} onClick={onClose}>
+      <div style={{ ...styles.modal, maxWidth: '640px', width: '100%' }} onClick={(e) => e.stopPropagation()}>
+        <div style={styles.modalHeader}>
+          <h3 style={styles.modalTitle}>Edited Images for Job #{job?.jobIndex}</h3>
+          <button style={styles.closeBtn} onClick={onClose}>×</button>
+        </div>
+        {loading ? (
+          <p style={styles.modalMuted}>Loading edited images…</p>
+        ) : error ? (
+          <p style={styles.errorMsg}>{error}</p>
+        ) : images.length === 0 ? (
+          <p style={styles.modalMuted}>No edited images found.</p>
+        ) : (
+          <>
+            <div style={styles.editedList}>
+              {images.map((item) => (
+                <div key={item.labelFilename} style={styles.editedRow}>
+                  <div style={styles.editedInfo}>
+                    <span style={styles.editedName}>{item.imageName || item.labelFilename}</span>
+                    {item.missingImage && <span style={styles.editedMeta}>Image file missing</span>}
+                  </div>
+                  {!item.missingImage && (
+                    <button style={styles.openBtn} onClick={() => onOpenOne(item.imageName)}>
+                      {openOneLabel}
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+            <div style={styles.editedFooter}>
+              <button style={styles.cancelBtn} onClick={onClose}>Close</button>
+              <button style={styles.submitBtn} onClick={onOpenAll} disabled={!images.some((item) => item.imageName)}>
+                {openAllLabel}
+              </button>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function ProgressBar({ jobs }) {
   if (!jobs || jobs.length === 0) return <div style={styles.progressEmpty}>No jobs</div>;
   const total = jobs.length;
@@ -1071,10 +1115,34 @@ function MyJobsTab() {
   const [jobs, setJobs] = useState([]);
   const [loading, setLoading] = useState(true);
   const [markDoneConfirm, setMarkDoneConfirm] = useState(null); // jobId
+  const [editedImagesModal, setEditedImagesModal] = useState(null);
 
   function openInNewTab(path) {
     if (typeof window === 'undefined') return;
     window.open(path, '_blank', 'noopener,noreferrer');
+  }
+
+  function openEditedSubset(job, imageNames) {
+    const names = (imageNames || []).filter(Boolean);
+    if (names.length === 0) return;
+    const params = new URLSearchParams({ jobId: String(job.id), edited: '1' });
+    params.set('start', names[0]);
+    openInNewTab(`/viewer?${params.toString()}`);
+  }
+
+  async function showEditedImages(job) {
+    setEditedImagesModal({ job, images: [], loading: true, error: '' });
+    try {
+      const res = await fetch(`/api/datasets/${job.datasetId}/jobs/${job.id}/edited-images`);
+      const data = await res.json();
+      if (!res.ok) {
+        setEditedImagesModal({ job, images: [], loading: false, error: data.error || 'Failed to load edited images' });
+        return;
+      }
+      setEditedImagesModal({ job, images: Array.isArray(data.images) ? data.images : [], loading: false, error: '' });
+    } catch {
+      setEditedImagesModal({ job, images: [], loading: false, error: 'Network error' });
+    }
   }
 
   async function handleMarkDone(jobId) {
@@ -1136,7 +1204,20 @@ function MyJobsTab() {
               <div style={styles.jobCardLeft}>
                 <span style={styles.jobCardDataset}>{j.datasetName || j.datasetPath?.split('/').pop() || `Dataset ${j.datasetId}`}</span>
                 <span style={styles.jobCardTitle}>Job #{j.jobIndex}</span>
-                <span style={styles.jobCardRange}>Images {j.imageStart}–{j.imageEnd}</span>
+                <span style={styles.jobCardRange}>
+                  Images {j.imageStart}–{j.imageEnd}
+                  <span style={styles.jobCardCount}> ({j.currentImageCount ?? (j.imageEnd - j.imageStart + 1)} imgs)</span>
+                </span>
+                {(j.editedFiles > 0 || j.deletedImages > 0) && (
+                  <span style={styles.jobCardStats}>
+                    {j.editedFiles > 0 && (
+                      <button type="button" style={styles.jobStatButton} onClick={() => showEditedImages(j)}>
+                        <span style={styles.jobStatEdited}>Edited: {j.editedFiles}</span>
+                      </button>
+                    )}
+                    {j.deletedImages > 0 && <span style={styles.jobStatDeleted}>Deleted: {j.deletedImages}</span>}
+                  </span>
+                )}
               </div>
               <div style={styles.jobCardRight}>
                 <span style={{ ...styles.statusBadge, background: STATUS_COLOR[j.status] + '22', color: STATUS_COLOR[j.status] }}>
@@ -1166,6 +1247,19 @@ function MyJobsTab() {
           onClose={() => setMarkDoneConfirm(null)}
         />
       )}
+      {editedImagesModal && (
+        <EditedImagesModal
+          job={editedImagesModal.job}
+          images={editedImagesModal.images}
+          loading={editedImagesModal.loading}
+          error={editedImagesModal.error}
+          openOneLabel="Open Viewer"
+          openAllLabel="Open All in Viewer"
+          onOpenOne={(imageName) => openEditedSubset(editedImagesModal.job, [imageName])}
+          onOpenAll={() => openEditedSubset(editedImagesModal.job, editedImagesModal.images.map((item) => item.imageName))}
+          onClose={() => setEditedImagesModal(null)}
+        />
+      )}
     </>
   );
 }
@@ -1174,10 +1268,34 @@ function UserDashboard({ user }) {
   const [jobs, setJobs] = useState([]);
   const [loading, setLoading] = useState(true);
   const [markDoneConfirm, setMarkDoneConfirm] = useState(null); // jobId
+  const [editedImagesModal, setEditedImagesModal] = useState(null);
 
   function openInNewTab(path) {
     if (typeof window === 'undefined') return;
     window.open(path, '_blank', 'noopener,noreferrer');
+  }
+
+  function openEditedSubset(job, imageNames) {
+    const names = (imageNames || []).filter(Boolean);
+    if (names.length === 0) return;
+    const params = new URLSearchParams({ jobId: String(job.id), edited: '1' });
+    params.set('start', names[0]);
+    openInNewTab(`/viewer?${params.toString()}`);
+  }
+
+  async function showEditedImages(job) {
+    setEditedImagesModal({ job, images: [], loading: true, error: '' });
+    try {
+      const res = await fetch(`/api/datasets/${job.datasetId}/jobs/${job.id}/edited-images`);
+      const data = await res.json();
+      if (!res.ok) {
+        setEditedImagesModal({ job, images: [], loading: false, error: data.error || 'Failed to load edited images' });
+        return;
+      }
+      setEditedImagesModal({ job, images: Array.isArray(data.images) ? data.images : [], loading: false, error: '' });
+    } catch {
+      setEditedImagesModal({ job, images: [], loading: false, error: 'Network error' });
+    }
   }
 
   async function handleMarkDone(jobId) {
@@ -1260,7 +1378,20 @@ function UserDashboard({ user }) {
                 <div style={styles.jobCardLeft}>
                   <span style={styles.jobCardDataset}>{j.datasetName || j.datasetPath?.split('/').pop() || `Dataset ${j.datasetId}`}</span>
                   <span style={styles.jobCardTitle}>Job #{j.jobIndex}</span>
-                  <span style={styles.jobCardRange}>Images {j.imageStart}–{j.imageEnd}</span>
+                  <span style={styles.jobCardRange}>
+                    Images {j.imageStart}–{j.imageEnd}
+                    <span style={styles.jobCardCount}> ({j.currentImageCount ?? (j.imageEnd - j.imageStart + 1)} imgs)</span>
+                  </span>
+                  {(j.editedFiles > 0 || j.deletedImages > 0) && (
+                    <span style={styles.jobCardStats}>
+                      {j.editedFiles > 0 && (
+                        <button type="button" style={styles.jobStatButton} onClick={() => showEditedImages(j)}>
+                          <span style={styles.jobStatEdited}>Edited: {j.editedFiles}</span>
+                        </button>
+                      )}
+                      {j.deletedImages > 0 && <span style={styles.jobStatDeleted}>Deleted: {j.deletedImages}</span>}
+                    </span>
+                  )}
                 </div>
                 <div style={styles.jobCardRight}>
                   <span style={{ ...styles.statusBadge, background: STATUS_COLOR[j.status] + '22', color: STATUS_COLOR[j.status] }}>
@@ -1289,6 +1420,19 @@ function UserDashboard({ user }) {
         <MarkDoneConfirmModal
           onConfirm={() => handleMarkDone(markDoneConfirm)}
           onClose={() => setMarkDoneConfirm(null)}
+        />
+      )}
+      {editedImagesModal && (
+        <EditedImagesModal
+          job={editedImagesModal.job}
+          images={editedImagesModal.images}
+          loading={editedImagesModal.loading}
+          error={editedImagesModal.error}
+          openOneLabel="Open Viewer"
+          openAllLabel="Open All in Viewer"
+          onOpenOne={(imageName) => openEditedSubset(editedImagesModal.job, [imageName])}
+          onOpenAll={() => openEditedSubset(editedImagesModal.job, editedImagesModal.images.map((item) => item.imageName))}
+          onClose={() => setEditedImagesModal(null)}
         />
       )}
     </div>
@@ -1484,6 +1628,25 @@ const styles = {
     fontSize: '12px',
     color: '#5a6a8a',
   },
+  jobCardCount: {
+    color: '#3a4f70',
+  },
+  jobCardStats: {
+    display: 'flex', gap: '10px', marginTop: '2px',
+  },
+  jobStatButton: {
+    background: 'transparent',
+    border: 'none',
+    cursor: 'pointer',
+    padding: 0,
+    font: 'inherit',
+  },
+  jobStatEdited: {
+    fontSize: '11px', fontWeight: 700, color: '#f1b11a',
+  },
+  jobStatDeleted: {
+    fontSize: '11px', fontWeight: 700, color: '#d24343',
+  },
   jobCardRight: {
     display: 'flex',
     alignItems: 'center',
@@ -1570,6 +1733,11 @@ const styles = {
     color: '#e6edf7',
     margin: 0,
   },
+  modalMuted: {
+    color: '#9ba9c3',
+    marginBottom: '18px',
+    fontSize: '14px',
+  },
   closeBtn: {
     background: 'transparent',
     border: 'none',
@@ -1608,6 +1776,48 @@ const styles = {
   hint: {
     color: '#5a6a8a',
     fontSize: '11px',
+  },
+  editedList: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '8px',
+    maxHeight: '50vh',
+    overflowY: 'auto',
+    marginBottom: '18px',
+  },
+  editedRow: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: '12px',
+    padding: '10px 12px',
+    background: '#152033',
+    border: '1px solid #25344d',
+    borderRadius: '8px',
+  },
+  editedInfo: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '4px',
+    minWidth: 0,
+  },
+  editedName: {
+    color: '#e6edf7',
+    fontSize: '13px',
+    fontWeight: 600,
+    fontFamily: 'monospace',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
+  },
+  editedMeta: {
+    color: '#9ba9c3',
+    fontSize: '11px',
+  },
+  editedFooter: {
+    display: 'flex',
+    justifyContent: 'flex-end',
+    gap: '10px',
   },
   previewBox: {
     marginTop: '8px',

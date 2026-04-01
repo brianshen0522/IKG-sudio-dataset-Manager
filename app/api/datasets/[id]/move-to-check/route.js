@@ -66,6 +66,7 @@ export const POST = withApiLogging(async function handler(req, { params }) {
       datasetPath: dataset.datasetPath,
       checkPath: type.checkPath,
       subdirName,
+      movedBy: actor.id,
     },
     options: { retryLimit, retryDelay: 60 },
   });

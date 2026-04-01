@@ -10,6 +10,7 @@ import path from 'path';
 import { appendTaskLog } from './db-tasks.js';
 import { createDatasetJobs, getJobsByDataset, assignJob } from './db-datasets.js';
 import { getMatchingDuplicateRule } from './manager.js';
+import { getPool } from './db.js';
 
 // ---------------------------------------------------------------------------
 // IoU + label parsing
@@ -239,6 +240,8 @@ export async function runDuplicateScan(job) {
       if (labelsLimit === 0 && rule.labels > 0) labelsLimit = rule.labels;
     }
 
+    let duplicateRemovedCount = 0;
+
     if (action === 'skip') {
       await log('info', 'Action is "skip" — no duplicate processing done.');
     } else {
@@ -253,12 +256,32 @@ export async function runDuplicateScan(job) {
         log,
       });
 
+      duplicateRemovedCount = processed;
       await log('info', `Scan done — ${duplicateGroups} duplicate group(s), ${processed} file(s) ${action === 'move' ? 'moved' : 'deleted'}.`);
+    }
+
+    // Store duplicate removed count on the dataset record.
+    if (duplicateRemovedCount > 0) {
+      try {
+        const pool = getPool();
+        await pool.query(
+          'UPDATE datasets SET duplicate_removed_count = $1 WHERE id = $2',
+          [duplicateRemovedCount, datasetId]
+        );
+      } catch (err) {
+        await log('warn', `Failed to store duplicate_removed_count: ${err.message}`);
+      }
     }
 
     await log('info', 'Slicing dataset into jobs…');
     const { totalImages, jobCount } = await createDatasetJobs(datasetId);
     await log('info', `Jobs created — ${totalImages} images → ${jobCount} job(s).`);
+
+    // Run hash baseline inline so this task only completes after all label files
+    // are hashed.  Pass the current pg-boss job ID so the hash logs appear in
+    // the same task timeline.
+    const { runHashBaseline } = await import('./hash-baseline-worker.js');
+    await runHashBaseline({ id: jobId, data: { datasetId, datasetPath } });
 
     if (autoAssignTo) {
       try {
