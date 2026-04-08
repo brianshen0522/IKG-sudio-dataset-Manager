@@ -3,6 +3,8 @@ import path from 'path';
 import fs from 'fs';
 import bcrypt from 'bcryptjs';
 import { emitUserInvalidated } from './auth-events.js';
+import { DOC_LANGS, getAllowedAudienceRoles, getPageOrder, sortPages } from './help-docs.js';
+import { getInitialDocSections } from './help-docs-seed.js';
 
 const { Pool } = pg;
 
@@ -236,6 +238,53 @@ export async function initDatabase() {
       );
     `);
 
+    // ---- Help docs (MDX content managed in DB) ----
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS doc_sections (
+        id            SERIAL PRIMARY KEY,
+        section_key   VARCHAR(255) UNIQUE NOT NULL,
+        page_key      VARCHAR(100) NOT NULL,
+        slug          VARCHAR(120) NOT NULL,
+        audience_role VARCHAR(50) NOT NULL,
+        sort_order    INTEGER NOT NULL DEFAULT 0,
+        created_at    TIMESTAMP DEFAULT NOW(),
+        updated_at    TIMESTAMP DEFAULT NOW(),
+        UNIQUE(page_key, audience_role, slug)
+      );
+    `);
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS doc_section_translations (
+        id              SERIAL PRIMARY KEY,
+        doc_section_id  INTEGER NOT NULL REFERENCES doc_sections(id) ON DELETE CASCADE,
+        lang            VARCHAR(20) NOT NULL,
+        title           TEXT NOT NULL,
+        summary         TEXT,
+        mdx_content     TEXT NOT NULL DEFAULT '',
+        last_updated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        last_updated_at TIMESTAMP DEFAULT NOW(),
+        version         INTEGER NOT NULL DEFAULT 1,
+        UNIQUE(doc_section_id, lang)
+      );
+    `);
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS doc_revisions (
+        id              SERIAL PRIMARY KEY,
+        doc_section_id  INTEGER NOT NULL REFERENCES doc_sections(id) ON DELETE CASCADE,
+        lang            VARCHAR(20) NOT NULL,
+        title           TEXT NOT NULL,
+        summary         TEXT,
+        mdx_content     TEXT NOT NULL,
+        edited_by       INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        edited_at       TIMESTAMP DEFAULT NOW(),
+        version         INTEGER NOT NULL
+      );
+    `);
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_doc_sections_page_role ON doc_sections(page_key, audience_role, sort_order);
+      CREATE INDEX IF NOT EXISTS idx_doc_translations_section_lang ON doc_section_translations(doc_section_id, lang);
+      CREATE INDEX IF NOT EXISTS idx_doc_revisions_section_lang ON doc_revisions(doc_section_id, lang, edited_at DESC);
+    `);
+
     // ---- Seed move_retry_limit ----
     await client.query(`
       INSERT INTO system_settings (key, value)
@@ -256,6 +305,8 @@ export async function initDatabase() {
       );
       console.log('[db] Initial admin user created (username: admin)');
     }
+
+    await seedHelpDocs(client);
 
     // ---- Legacy instances table (kept for backward compatibility during migration) ----
     const tableCheck = await client.query(`SELECT to_regclass('public.instances') AS table_name`);
@@ -361,6 +412,61 @@ export async function ensureInitialized() {
     });
   }
   return initPromise;
+}
+
+async function seedHelpDocs(client) {
+  const sections = getInitialDocSections();
+  const currentKeys = sections.map((section) => section.key);
+
+  await client.query(
+    `DELETE FROM doc_sections
+      WHERE section_key <> ALL($1::text[])`,
+    [currentKeys]
+  );
+
+  for (const section of sections) {
+    const sectionResult = await client.query(
+      `INSERT INTO doc_sections (section_key, page_key, slug, audience_role, sort_order, updated_at)
+       VALUES ($1, $2, $3, $4, $5, NOW())
+       ON CONFLICT (section_key) DO UPDATE
+       SET page_key = EXCLUDED.page_key,
+           slug = EXCLUDED.slug,
+           audience_role = EXCLUDED.audience_role,
+           sort_order = EXCLUDED.sort_order,
+           updated_at = NOW()
+       RETURNING id`,
+      [section.key, section.pageKey, section.slug, section.audienceRole, section.sortOrder]
+    );
+
+    const sectionId = sectionResult.rows[0].id;
+    for (const lang of DOC_LANGS) {
+      const translation = section.translations[lang];
+      if (!translation) continue;
+      await client.query(
+        `INSERT INTO doc_section_translations
+           (doc_section_id, lang, title, summary, mdx_content, last_updated_by, last_updated_at, version)
+         VALUES ($1, $2, $3, $4, $5, NULL, NOW(), 1)
+         ON CONFLICT (doc_section_id, lang) DO UPDATE
+         SET title = CASE
+               WHEN doc_section_translations.last_updated_by IS NULL THEN EXCLUDED.title
+               ELSE doc_section_translations.title
+             END,
+             summary = CASE
+               WHEN doc_section_translations.last_updated_by IS NULL THEN EXCLUDED.summary
+               ELSE doc_section_translations.summary
+             END,
+             mdx_content = CASE
+               WHEN doc_section_translations.last_updated_by IS NULL THEN EXCLUDED.mdx_content
+               ELSE doc_section_translations.mdx_content
+             END,
+             last_updated_at = CASE
+               WHEN doc_section_translations.last_updated_by IS NULL THEN NOW()
+               ELSE doc_section_translations.last_updated_at
+             END`,
+        [sectionId, lang, translation.title, translation.summary || '', translation.mdxContent || '']
+      );
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -541,6 +647,229 @@ export async function setSetting(key, value, updatedBy = null) {
        ON CONFLICT (key) DO UPDATE SET value = $2, updated_by = $3, updated_at = NOW()`,
       [key, String(value), updatedBy]
     );
+  } finally {
+    client.release();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Help docs helpers
+// ---------------------------------------------------------------------------
+
+function rowToDocTranslation(row) {
+  if (!row) return null;
+  return {
+    id: row.translation_id ?? row.id,
+    title: row.title,
+    summary: row.summary || '',
+    mdxContent: row.mdx_content || '',
+    lang: row.lang,
+    version: row.version,
+    lastUpdatedAt: row.last_updated_at ? row.last_updated_at.toISOString() : null,
+    lastUpdatedBy: row.last_updated_by
+      ? {
+          id: row.last_updated_by,
+          username: row.last_updated_by_username || null,
+        }
+      : null,
+  };
+}
+
+function rowToDocSection(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    key: row.section_key,
+    pageKey: row.page_key,
+    slug: row.slug,
+    audienceRole: row.audience_role,
+    sortOrder: row.sort_order,
+    createdAt: row.created_at ? row.created_at.toISOString() : null,
+    updatedAt: row.updated_at ? row.updated_at.toISOString() : null,
+  };
+}
+
+function groupDocRows(rows, { lang, userRole }) {
+  const pageMap = new Map();
+  for (const row of rows) {
+    if (!pageMap.has(row.page_key)) {
+      pageMap.set(row.page_key, {
+        pageKey: row.page_key,
+        order: getPageOrder(row.page_key),
+        sections: [],
+      });
+    }
+    const page = pageMap.get(row.page_key);
+    page.sections.push({
+      ...rowToDocSection(row),
+      translation: rowToDocTranslation(row),
+      lang,
+      visibleToRole: userRole,
+    });
+  }
+
+  return sortPages([...pageMap.keys()]).map((pageKey) => ({
+    ...pageMap.get(pageKey),
+    sections: pageMap.get(pageKey).sections.sort((a, b) => a.sortOrder - b.sortOrder),
+  }));
+}
+
+export async function getVisibleDocPages({ role, lang }) {
+  await ensureInitialized();
+  const client = await getPool().connect();
+  try {
+    const visibleRoles = getAllowedAudienceRoles(role);
+    const result = await client.query(
+      `SELECT ds.*, dst.id AS translation_id, dst.lang, dst.title, dst.summary, dst.mdx_content,
+              dst.last_updated_by, dst.last_updated_at, dst.version,
+              u.username AS last_updated_by_username
+         FROM doc_sections ds
+         JOIN doc_section_translations dst ON dst.doc_section_id = ds.id
+         LEFT JOIN users u ON u.id = dst.last_updated_by
+        WHERE dst.lang = $1
+          AND ds.audience_role = ANY($2::text[])
+        ORDER BY ds.page_key ASC, ds.sort_order ASC, ds.id ASC`,
+      [lang, visibleRoles]
+    );
+    return groupDocRows(result.rows, { lang, userRole: role });
+  } finally {
+    client.release();
+  }
+}
+
+export async function getAllDocPagesForAdmin() {
+  await ensureInitialized();
+  const client = await getPool().connect();
+  try {
+    const result = await client.query(
+      `SELECT ds.*, dst.id AS translation_id, dst.lang, dst.title, dst.summary, dst.mdx_content,
+              dst.last_updated_by, dst.last_updated_at, dst.version,
+              u.username AS last_updated_by_username
+         FROM doc_sections ds
+         LEFT JOIN doc_section_translations dst ON dst.doc_section_id = ds.id
+         LEFT JOIN users u ON u.id = dst.last_updated_by
+        ORDER BY ds.page_key ASC, ds.sort_order ASC, ds.id ASC, dst.lang ASC`
+    );
+
+    const sectionMap = new Map();
+    for (const row of result.rows) {
+      if (!sectionMap.has(row.id)) {
+        sectionMap.set(row.id, {
+          ...rowToDocSection(row),
+          translations: {},
+        });
+      }
+      if (row.lang) {
+        sectionMap.get(row.id).translations[row.lang] = rowToDocTranslation(row);
+      }
+    }
+
+    const pageMap = new Map();
+    for (const section of sectionMap.values()) {
+      if (!pageMap.has(section.pageKey)) {
+        pageMap.set(section.pageKey, {
+          pageKey: section.pageKey,
+          order: getPageOrder(section.pageKey),
+          sections: [],
+        });
+      }
+      pageMap.get(section.pageKey).sections.push(section);
+    }
+
+    return sortPages([...pageMap.keys()]).map((pageKey) => ({
+      ...pageMap.get(pageKey),
+      sections: pageMap.get(pageKey).sections.sort((a, b) => a.sortOrder - b.sortOrder),
+    }));
+  } finally {
+    client.release();
+  }
+}
+
+export async function updateDocSectionTranslation(sectionId, { lang, title, summary, mdxContent, editorUserId }) {
+  await ensureInitialized();
+  const client = await getPool().connect();
+  try {
+    await client.query('BEGIN');
+    const translationResult = await client.query(
+      `SELECT * FROM doc_section_translations WHERE doc_section_id = $1 AND lang = $2 FOR UPDATE`,
+      [sectionId, lang]
+    );
+    const current = translationResult.rows[0];
+    const nextVersion = current ? Number(current.version || 0) + 1 : 1;
+
+    const saveResult = await client.query(
+      `INSERT INTO doc_section_translations
+         (doc_section_id, lang, title, summary, mdx_content, last_updated_by, last_updated_at, version)
+       VALUES ($1, $2, $3, $4, $5, $6, NOW(), $7)
+       ON CONFLICT (doc_section_id, lang) DO UPDATE
+       SET title = EXCLUDED.title,
+           summary = EXCLUDED.summary,
+           mdx_content = EXCLUDED.mdx_content,
+           last_updated_by = EXCLUDED.last_updated_by,
+           last_updated_at = NOW(),
+           version = EXCLUDED.version
+       RETURNING *`,
+      [sectionId, lang, title, summary || '', mdxContent || '', editorUserId || null, nextVersion]
+    );
+
+    const saved = saveResult.rows[0];
+    await client.query(
+      `INSERT INTO doc_revisions
+         (doc_section_id, lang, title, summary, mdx_content, edited_by, edited_at, version)
+       VALUES ($1, $2, $3, $4, $5, $6, NOW(), $7)`,
+      [sectionId, lang, saved.title, saved.summary || '', saved.mdx_content || '', editorUserId || null, saved.version]
+    );
+
+    await client.query(
+      `UPDATE doc_sections SET updated_at = NOW() WHERE id = $1`,
+      [sectionId]
+    );
+    await client.query('COMMIT');
+
+    const detail = await client.query(
+      `SELECT dst.*, u.username AS last_updated_by_username
+         FROM doc_section_translations dst
+         LEFT JOIN users u ON u.id = dst.last_updated_by
+        WHERE dst.doc_section_id = $1 AND dst.lang = $2`,
+      [sectionId, lang]
+    );
+    return rowToDocTranslation(detail.rows[0]);
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+export async function getDocRevisionHistory(sectionId, lang, limit = 20) {
+  await ensureInitialized();
+  const client = await getPool().connect();
+  try {
+    const result = await client.query(
+      `SELECT dr.*, u.username AS edited_by_username
+         FROM doc_revisions dr
+         LEFT JOIN users u ON u.id = dr.edited_by
+        WHERE dr.doc_section_id = $1 AND dr.lang = $2
+        ORDER BY dr.edited_at DESC, dr.id DESC
+        LIMIT $3`,
+      [sectionId, lang, limit]
+    );
+    return result.rows.map((row) => ({
+      id: row.id,
+      lang: row.lang,
+      title: row.title,
+      summary: row.summary || '',
+      mdxContent: row.mdx_content || '',
+      version: row.version,
+      editedAt: row.edited_at ? row.edited_at.toISOString() : null,
+      editedBy: row.edited_by
+        ? {
+            id: row.edited_by,
+            username: row.edited_by_username || null,
+          }
+        : null,
+    }));
   } finally {
     client.release();
   }

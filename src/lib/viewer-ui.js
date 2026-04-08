@@ -568,6 +568,31 @@ function buildShell() {
     flex-wrap: wrap;
   }
 
+  .v-toolbar-spacer {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .v-manual-link {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    text-decoration: none;
+    color: #ddd;
+    border: 1px solid #444;
+    border-radius: 4px;
+    background: #2b2b2b;
+    padding: 6px 10px;
+    font-size: 12px;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+
+  .v-manual-link:hover {
+    border-color: var(--v-accent);
+    color: #fff;
+  }
+
   .v-load-wrap {
     display: none;
     padding: 10px 20px;
@@ -1078,6 +1103,8 @@ function buildShell() {
         <button class="v-nav-btn" id="vNavNextBtn" onclick="vNavNext()" disabled title="Next match">↓</button>
         <div class="v-tbar-info" id="vTbarInfo"></div>
       </div>
+      <div class="v-toolbar-spacer"></div>
+      <a class="v-manual-link" href="/help?page=viewer">Manual</a>
     </div>
     <div class="v-load-wrap" id="vLoadWrap">
       <div class="v-load-top">

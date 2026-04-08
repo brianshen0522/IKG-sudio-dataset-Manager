@@ -76,5 +76,7 @@ export default function ViewerPage() {
     return <div style={{ padding: '20px', color: '#aaa' }}>Loading...</div>;
   }
 
-  return <div id="viewerRoot" style={{ width: '100vw', height: '100vh', display: 'flex', flexDirection: 'column' }} />;
+  return (
+    <div id="viewerRoot" style={{ width: '100vw', height: '100vh', display: 'flex', flexDirection: 'column' }} />
+  );
 }

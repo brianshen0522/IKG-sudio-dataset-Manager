@@ -123,6 +123,13 @@ export default function LabelEditorPage() {
               {t('manager.openViewer') || 'Open Viewer'}
             </a>
           )}
+          <a
+            href="/help?page=label-editor"
+            className="btn btn-secondary"
+            style={{ fontSize: '12px', padding: '4px 10px', textDecoration: 'none', whiteSpace: 'nowrap' }}
+          >
+            Manual
+          </a>
         </div>
         <div className="header-actions">
           <button className="btn btn-secondary" id="prevBtn" onClick={() => callApi('previousImage')}>

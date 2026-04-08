@@ -1528,12 +1528,15 @@ function shortcutMatch(e, actionId) {
         function drawPreviewAnnotations(canvas, img, imagePath) {
             if (!canvas || !img) return;
             const pCtx = canvas.getContext('2d');
+            if (!pCtx) return;
             const cw = canvas.width;
             const ch = canvas.height;
             pCtx.clearRect(0, 0, cw, ch);
-            if (!img.naturalWidth || !img.naturalHeight) return;
-            if (img.dataset.loaded !== 'true') return;
-            const cached = preloadedLabels.get(imagePath);
+            if (!img.complete || !img.naturalWidth || !img.naturalHeight) return;
+            const basename = imagePath.split('/').pop();
+            const cached = preloadedLabels.get(imagePath)
+                || preloadedLabels.get(basename)
+                || preloadedLabels.get(`images/${basename}`);
             if (!cached || cached.loading || !cached.labelContent) return;
             const anns = parseLabelData(cached.labelContent);
             if (!anns || anns.length === 0) return;
@@ -1603,14 +1606,16 @@ function shortcutMatch(e, actionId) {
             annCanvas.height = 100;
 
             img.onload = () => {
+                img.dataset.loaded = 'true';
                 drawPreviewAnnotations(annCanvas, img, imagePath);
             };
 
             // Use image path as cache key instead of index
             if (imageThumbnails[imagePath]) {
                 img.src = imageThumbnails[imagePath];
-                img.dataset.loaded = 'true';
+                img.dataset.loaded = 'false';
             } else {
+                img.dataset.loaded = 'false';
                 const loadingText = encodeURIComponent(t('common.loading'));
                 img.src = `data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" width="80" height="80"><rect width="80" height="80" fill="%23333"/><text x="50%" y="50%" text-anchor="middle" fill="%23aaa" font-size="12">${loadingText}</text></svg>`;
             }
@@ -1933,8 +1938,22 @@ function shortcutMatch(e, actionId) {
             }
             const selector = getPreviewImageSelector(imagePath);
             previewContainer.querySelectorAll(selector).forEach((img) => {
-                img.dataset.loaded = 'true';
+                img.dataset.loaded = 'false';
+                img.onload = () => {
+                    img.dataset.loaded = 'true';
+                    const annCanvas = img.parentElement?.querySelector('canvas.preview-annotations');
+                    if (annCanvas) {
+                        drawPreviewAnnotations(annCanvas, img, imagePath);
+                    }
+                };
                 img.src = dataUrl;
+                if (img.complete && img.naturalWidth > 0) {
+                    img.dataset.loaded = 'true';
+                    const annCanvas = img.parentElement?.querySelector('canvas.preview-annotations');
+                    if (annCanvas) {
+                        drawPreviewAnnotations(annCanvas, img, imagePath);
+                    }
+                }
             });
         }
 
@@ -3029,17 +3048,29 @@ function shortcutMatch(e, actionId) {
         }
 
         function setupCanvas() {
+            if (!canvas || !image) {
+                return;
+            }
             // Set canvas internal resolution to match container size
             const container = document.querySelector('.canvas-container');
+            if (!container) {
+                return;
+            }
             canvas.width = container.clientWidth;
             canvas.height = container.clientHeight;
+            if (!image.width || !image.height) {
+                return;
+            }
 
             // Calculate base scale to fit image to canvas (fill at least one dimension)
             const scaleX = canvas.width / image.width;
             const scaleY = canvas.height / image.height;
             baseScale = Math.min(scaleX, scaleY);
 
-            document.getElementById('imageSize').textContent = `${image.width} x ${image.height}`;
+            const imageSizeEl = document.getElementById('imageSize');
+            if (imageSizeEl) {
+                imageSizeEl.textContent = `${image.width} x ${image.height}`;
+            }
             viewScale = 1;
             viewOffsetX = 0;
             viewOffsetY = 0;

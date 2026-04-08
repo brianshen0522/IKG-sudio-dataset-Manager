@@ -10,6 +10,14 @@ export const metadata = {
 export default function Page() {
   return (
     <>
+      <a
+        href="/help?page=label-editor"
+        target="_blank"
+        rel="noreferrer"
+        style={{ position: 'absolute', top: 16, right: 16, zIndex: 10, color: '#fff', textDecoration: 'none', padding: '8px 12px', border: '1px solid #3f5f8a', borderRadius: '8px', background: 'rgba(14, 27, 46, 0.9)', fontSize: '13px', fontWeight: 600 }}
+      >
+        Manual
+      </a>
       <style dangerouslySetInnerHTML={{ __html: styles }} />
       <div dangerouslySetInnerHTML={{ __html: bodyHtml }} />
       <Script src="/js/auto-launcher.js" strategy="afterInteractive" />

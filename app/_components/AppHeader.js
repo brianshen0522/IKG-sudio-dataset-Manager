@@ -1,10 +1,12 @@
 'use client';
 
+import Link from 'next/link';
 import { useRouter, usePathname } from 'next/navigation';
-import { useState, useEffect, useRef } from 'react';
+import { useEffect, useState } from 'react';
 import { useCurrentUser } from './useCurrentUser';
 import DbOfflineBanner from './DbOfflineBanner';
 import { subscribeSSE } from '@/lib/shared-sse';
+import { buildHelpHref } from '@/lib/help-docs';
 
 function useRunningTaskCount(enabled) {
   const [count, setCount] = useState(0);
@@ -35,6 +37,7 @@ export default function AppHeader({ title, backHref, backLabel }) {
   const isDM = user?.role === 'data-manager';
   const isAdminOrDM = isAdmin || isDM;
   const runningTasks = useRunningTaskCount(isAdminOrDM);
+  const helpHref = buildHelpHref({ pathname, role: user?.role });
 
   async function handleLogout() {
     await fetch('/api/auth/logout', { method: 'POST' });
@@ -115,6 +118,24 @@ export default function AppHeader({ title, backHref, backLabel }) {
             <span style={styles.userRole}>{user.role}</span>
             <span style={styles.userName}>{user.username}</span>
           </span>
+        )}
+        {user && (
+          <Link
+            href={helpHref}
+            style={{ ...styles.logoutBtn, ...(pathname?.startsWith('/help') ? styles.logoutBtnActive : {}) }}
+            title="User Manual"
+          >
+            Manual
+          </Link>
+        )}
+        {isAdmin && (
+          <Link
+            href="/admin/docs"
+            style={{ ...styles.logoutBtn, ...(pathname?.startsWith('/admin/docs') ? styles.logoutBtnActive : {}) }}
+            title="Docs Editor"
+          >
+            Docs Editor
+          </Link>
         )}
         {user && (
           <button
